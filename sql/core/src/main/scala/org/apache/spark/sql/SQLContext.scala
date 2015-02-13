@@ -786,8 +786,8 @@ class SQLContext(@transient val sparkContext: SparkContext)
     DataFrame(this, catalog.lookupRelation(Seq(tableName)))
 
   /**
-   * Returns a [[DataFrame]] containing names of existing tables in the given database.
-   * The returned DataFrame has two columns, tableName and isTemporary (a column with BooleanType
+   * Returns a [[DataFrame]] containing names of existing tables in the current database.
+   * The returned DataFrame has two columns, tableName and isTemporary (a Boolean
    * indicating if a table is a temporary one or not).
    */
   def tables(): DataFrame = {
@@ -795,8 +795,8 @@ class SQLContext(@transient val sparkContext: SparkContext)
   }
 
   /**
-   * Returns a [[DataFrame]] containing names of existing tables in the current database.
-   * The returned DataFrame has two columns, tableName and isTemporary (a column with BooleanType
+   * Returns a [[DataFrame]] containing names of existing tables in the given database.
+   * The returned DataFrame has two columns, tableName and isTemporary (a Boolean
    * indicating if a table is a temporary one or not).
    */
   def tables(databaseName: String): DataFrame = {
@@ -804,7 +804,7 @@ class SQLContext(@transient val sparkContext: SparkContext)
   }
 
   /**
-   * Returns an array of names of tables in the current database.
+   * Returns the names of tables in the current database as an array.
    */
   def tableNames(): Array[String] = {
     catalog.getTables(None).map {
@@ -813,7 +813,7 @@ class SQLContext(@transient val sparkContext: SparkContext)
   }
 
   /**
-   * Returns an array of names of tables in the given database.
+   * Returns the names of tables in the given database as an array.
    */
   def tableNames(databaseName: String): Array[String] = {
     catalog.getTables(Some(databaseName)).map {
