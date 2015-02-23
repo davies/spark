@@ -15,30 +15,19 @@
  * limitations under the License.
  */
 
-package org.apache.spark.streaming;
+package org.apache.spark.sql.hive
 
-import org.apache.spark.SparkConf;
-import org.apache.spark.streaming.api.java.JavaStreamingContext;
-import org.junit.After;
-import org.junit.Before;
+import org.scalatest.FunSuite
 
-public abstract class LocalJavaStreamingContext {
+import org.apache.spark.SparkConf
+import org.apache.spark.serializer.JavaSerializer
+import org.apache.spark.sql.hive.test.TestHive
 
-    protected transient JavaStreamingContext ssc;
+class SerializationSuite extends FunSuite {
 
-    @Before
-    public void setUp() {
-        SparkConf conf = new SparkConf()
-            .setMaster("local[2]")
-            .setAppName("test")
-            .set("spark.streaming.clock", "org.apache.spark.util.ManualClock");
-        ssc = new JavaStreamingContext(conf, new Duration(1000));
-        ssc.checkpoint("checkpoint");
-    }
-
-    @After
-    public void tearDown() {
-        ssc.stop();
-        ssc = null;
-    }
+  test("[SPARK-5840] HiveContext should be serializable") {
+    val hiveContext = new HiveContext(TestHive.sparkContext)
+    hiveContext.hiveconf
+    new JavaSerializer(new SparkConf()).newInstance().serialize(hiveContext)
+  }
 }

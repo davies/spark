@@ -217,6 +217,11 @@ class SQLContext(@transient val sparkContext: SparkContext)
    */
   def uncacheTable(tableName: String): Unit = cacheManager.uncacheTable(tableName)
 
+  /**
+   * Removes all cached tables from the in-memory cache.
+   */
+  def clearCache(): Unit = cacheManager.clearCache()
+
   // scalastyle:off
   // Disable style checker so "implicits" object can start with lowercase i
   /**
@@ -1130,6 +1135,7 @@ class SQLContext(@transient val sparkContext: SparkContext)
     def needsConversion(dataType: DataType): Boolean = dataType match {
       case ByteType => true
       case ShortType => true
+      case LongType => true
       case FloatType => true
       case DateType => true
       case TimestampType => true

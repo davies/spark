@@ -546,7 +546,7 @@ class DataFrame(object):
     def __getitem__(self, item):
         """ Return the column by given name
 
-        >>> df['age'].collect()
+        >>> df.select(df['age']).collect()
         [Row(age=2), Row(age=5)]
         >>> df[ ["name", "age"]].collect()
         [Row(name=u'Alice', age=2), Row(name=u'Bob', age=5)]
@@ -555,7 +555,7 @@ class DataFrame(object):
         """
         if isinstance(item, basestring):
             jc = self._jdf.apply(item)
-            return Column(jc, self.sql_ctx)
+            return Column(jc)
         elif isinstance(item, Column):
             return self.filter(item)
         elif isinstance(item, list):
@@ -566,13 +566,13 @@ class DataFrame(object):
     def __getattr__(self, name):
         """ Return the column by given name
 
-        >>> df.age.collect()
+        >>> df.select(df.age).collect()
         [Row(age=2), Row(age=5)]
         """
         if name.startswith("__"):
             raise AttributeError(name)
         jc = self._jdf.apply(name)
-        return Column(jc, self.sql_ctx)
+        return Column(jc)
 
     def select(self, *cols):
         """ Selecting a set of expressions.
@@ -698,7 +698,7 @@ class DataFrame(object):
         >>> df.withColumnRenamed('age', 'age2').collect()
         [Row(age2=2, name=u'Alice'), Row(age2=5, name=u'Bob')]
         """
-        cols = [Column(_to_java_column(c), self.sql_ctx).alias(new)
+        cols = [Column(_to_java_column(c)).alias(new)
                 if c == existing else c
                 for c in self.columns]
         return self.select(*cols)
@@ -803,7 +803,7 @@ class GroupedData(object):
         >>> df.groupBy().mean('age').collect()
         [Row(AVG(age#0)=3.5)]
         >>> df3.groupBy().mean('age', 'height').collect()
-        [Row(AVG(age#4)=3.5, AVG(height#5)=82.5)]
+        [Row(AVG(age#4L)=3.5, AVG(height#5L)=82.5)]
         """
 
     @df_varargs_api
@@ -814,7 +814,7 @@ class GroupedData(object):
         >>> df.groupBy().avg('age').collect()
         [Row(AVG(age#0)=3.5)]
         >>> df3.groupBy().avg('age', 'height').collect()
-        [Row(AVG(age#4)=3.5, AVG(height#5)=82.5)]
+        [Row(AVG(age#4L)=3.5, AVG(height#5L)=82.5)]
         """
 
     @df_varargs_api
@@ -825,7 +825,7 @@ class GroupedData(object):
         >>> df.groupBy().max('age').collect()
         [Row(MAX(age#0)=5)]
         >>> df3.groupBy().max('age', 'height').collect()
-        [Row(MAX(age#4)=5, MAX(height#5)=85)]
+        [Row(MAX(age#4L)=5, MAX(height#5L)=85)]
         """
 
     @df_varargs_api
@@ -836,7 +836,7 @@ class GroupedData(object):
         >>> df.groupBy().min('age').collect()
         [Row(MIN(age#0)=2)]
         >>> df3.groupBy().min('age', 'height').collect()
-        [Row(MIN(age#4)=2, MIN(height#5)=80)]
+        [Row(MIN(age#4L)=2, MIN(height#5L)=80)]
         """
 
     @df_varargs_api
@@ -847,7 +847,7 @@ class GroupedData(object):
         >>> df.groupBy().sum('age').collect()
         [Row(SUM(age#0)=7)]
         >>> df3.groupBy().sum('age', 'height').collect()
-        [Row(SUM(age#4)=7, SUM(height#5)=165)]
+        [Row(SUM(age#4L)=7, SUM(height#5L)=165)]
         """
 
 
@@ -873,15 +873,16 @@ def _unary_op(name, doc="unary operator"):
     """ Create a method for given unary operator """
     def _(self):
         jc = getattr(self._jc, name)()
-        return Column(jc, self.sql_ctx)
+        return Column(jc)
     _.__doc__ = doc
     return _
 
 
 def _func_op(name, doc=''):
     def _(self):
-        jc = getattr(self._sc._jvm.functions, name)(self._jc)
-        return Column(jc, self.sql_ctx)
+        sc = SparkContext._active_spark_context
+        jc = getattr(sc._jvm.functions, name)(self._jc)
+        return Column(jc)
     _.__doc__ = doc
     return _
 
@@ -892,7 +893,7 @@ def _bin_op(name, doc="binary operator"):
     def _(self, other):
         jc = other._jc if isinstance(other, Column) else other
         njc = getattr(self._jc, name)(jc)
-        return Column(njc, self.sql_ctx)
+        return Column(njc)
     _.__doc__ = doc
     return _
 
@@ -903,12 +904,12 @@ def _reverse_op(name, doc="binary operator"):
     def _(self, other):
         jother = _create_column_from_literal(other)
         jc = getattr(jother, name)(self._jc)
-        return Column(jc, self.sql_ctx)
+        return Column(jc)
     _.__doc__ = doc
     return _
 
 
-class Column(DataFrame):
+class Column(object):
 
     """
     A column in a DataFrame.
@@ -924,9 +925,8 @@ class Column(DataFrame):
         1 / df.colName
     """
 
-    def __init__(self, jc, sql_ctx=None):
+    def __init__(self, jc):
         self._jc = jc
-        super(Column, self).__init__(jc, sql_ctx)
 
     # arithmetic operators
     __neg__ = _func_op("negate")
@@ -975,7 +975,7 @@ class Column(DataFrame):
         :param startPos: start position (int or Column)
         :param length:  length of the substring (int or Column)
 
-        >>> df.name.substr(1, 3).collect()
+        >>> df.select(df.name.substr(1, 3).alias("col")).collect()
         [Row(col=u'Ali'), Row(col=u'Bob')]
         """
         if type(startPos) != type(length):
@@ -986,7 +986,7 @@ class Column(DataFrame):
             jc = self._jc.substr(startPos._jc, length._jc)
         else:
             raise TypeError("Unexpected type: %s" % type(startPos))
-        return Column(jc, self.sql_ctx)
+        return Column(jc)
 
     __getslice__ = substr
 
@@ -1000,10 +1000,10 @@ class Column(DataFrame):
     def alias(self, alias):
         """Return a alias for this column
 
-        >>> df.age.alias("age2").collect()
+        >>> df.select(df.age.alias("age2")).collect()
         [Row(age2=2), Row(age2=5)]
         """
-        return Column(getattr(self._jc, "as")(alias), self.sql_ctx)
+        return Column(getattr(self._jc, "as")(alias))
 
     def cast(self, dataType):
         """ Convert the column into type `dataType`
@@ -1013,33 +1013,17 @@ class Column(DataFrame):
         >>> df.select(df.age.cast(StringType()).alias('ages')).collect()
         [Row(ages=u'2'), Row(ages=u'5')]
         """
-        if self.sql_ctx is None:
-            sc = SparkContext._active_spark_context
-            ssql_ctx = sc._jvm.SQLContext(sc._jsc.sc())
-        else:
-            ssql_ctx = self.sql_ctx._ssql_ctx
         if isinstance(dataType, basestring):
             jc = self._jc.cast(dataType)
         elif isinstance(dataType, DataType):
+            sc = SparkContext._active_spark_context
+            ssql_ctx = sc._jvm.SQLContext(sc._jsc.sc())
             jdt = ssql_ctx.parseDataType(dataType.json())
             jc = self._jc.cast(jdt)
-        return Column(jc, self.sql_ctx)
+        return Column(jc)
 
     def __repr__(self):
         return 'Column<%s>' % self._jdf.toString().encode('utf8')
-
-    def toPandas(self):
-        """
-        Return a pandas.Series from the column
-
-        >>> df.age.toPandas()  # doctest: +SKIP
-        0    2
-        1    5
-        dtype: int64
-        """
-        import pandas as pd
-        data = [c for c, in self.collect()]
-        return pd.Series(data)
 
 
 def _test():
@@ -1051,7 +1035,9 @@ def _test():
     sc = SparkContext('local[4]', 'PythonTest')
     globs['sc'] = sc
     globs['sqlCtx'] = SQLContext(sc)
-    globs['df'] = sc.parallelize([Row(name='Alice', age=2), Row(name='Bob', age=5)]).toDF()
+    globs['df'] = sc.parallelize([(2, 'Alice'), (5, 'Bob')])\
+        .toDF(StructType([StructField('age', IntegerType()),
+                          StructField('name', StringType())]))
     globs['df2'] = sc.parallelize([Row(name='Tom', height=80), Row(name='Bob', height=85)]).toDF()
     globs['df3'] = sc.parallelize([Row(name='Alice', age=2, height=80),
                                   Row(name='Bob', age=5, height=85)]).toDF()
