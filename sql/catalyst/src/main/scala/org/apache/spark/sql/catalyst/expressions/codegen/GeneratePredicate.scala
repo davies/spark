@@ -31,6 +31,8 @@ abstract class Predicate {
  */
 object GeneratePredicate extends CodeGenerator[Expression, (InternalRow) => Boolean] {
 
+  protected def isThreadSafe(in: Expression): Boolean = in.isThreadSafe
+
   protected def canonicalize(in: Expression): Expression = ExpressionCanonicalizer.execute(in)
 
   protected def bind(in: Expression, inputSchema: Seq[Attribute]): Expression =

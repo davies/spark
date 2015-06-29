@@ -34,6 +34,8 @@ abstract class BaseProject extends Projection {}
 object GenerateProjection extends CodeGenerator[Seq[Expression], Projection] {
   import scala.reflect.runtime.universe._
 
+  protected def isThreadSafe(in: Seq[Expression]): Boolean = in.forall(_.isThreadSafe)
+
   protected def canonicalize(in: Seq[Expression]): Seq[Expression] =
     in.map(ExpressionCanonicalizer.execute)
 

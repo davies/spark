@@ -76,9 +76,6 @@ abstract class Expression extends TreeNode[Expression] {
    * @return [[GeneratedExpressionCode]]
    */
   def gen(ctx: CodeGenContext): GeneratedExpressionCode = {
-    if (!isThreadSafe) {
-      throw new Exception(s"$this is not thread-safe, can not be used in codegen")
-    }
     val isNull = ctx.freshName("isNull")
     val primitive = ctx.freshName("primitive")
     val ve = GeneratedExpressionCode("", isNull, primitive)

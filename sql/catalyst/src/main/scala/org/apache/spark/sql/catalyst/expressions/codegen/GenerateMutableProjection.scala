@@ -28,6 +28,8 @@ abstract class BaseMutableProjection extends MutableProjection
  */
 object GenerateMutableProjection extends CodeGenerator[Seq[Expression], () => MutableProjection] {
 
+  protected def isThreadSafe(in: Seq[Expression]): Boolean = in.forall(_.isThreadSafe)
+
   protected def canonicalize(in: Seq[Expression]): Seq[Expression] =
     in.map(ExpressionCanonicalizer.execute)
 

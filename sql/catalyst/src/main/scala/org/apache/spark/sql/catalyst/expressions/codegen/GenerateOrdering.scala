@@ -40,6 +40,8 @@ object GenerateOrdering
     extends CodeGenerator[Seq[SortOrder], Ordering[InternalRow]] with Logging {
   import scala.reflect.runtime.universe._
 
+  protected def isThreadSafe(in: Seq[SortOrder]): Boolean = in.forall(_.child.isThreadSafe)
+
   protected def canonicalize(in: Seq[SortOrder]): Seq[SortOrder] =
     in.map(ExpressionCanonicalizer.execute(_).asInstanceOf[SortOrder])
 

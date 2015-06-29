@@ -216,6 +216,12 @@ abstract class CodeGenerator[InType <: AnyRef, OutType <: AnyRef] extends Loggin
   protected val genericMutableRowType: String = classOf[GenericMutableRow].getName
 
   /**
+   * Returns whether the expressions are thread safe or not.
+   * @return
+   */
+  protected def isThreadSafe(in: InType): Boolean
+
+  /**
    * Generates a class for a given input expression.  Called when there is not cached code
    * already available.
    */
@@ -282,7 +288,16 @@ abstract class CodeGenerator[InType <: AnyRef, OutType <: AnyRef] extends Loggin
     generate(bind(expressions, inputSchema))
 
   /** Generates the requested evaluator given already bound expression(s). */
-  def generate(expressions: InType): OutType = cache.get(canonicalize(expressions))
+  def generate(expressions: InType): OutType = {
+    val canonized = canonicalize(expressions)
+    if (isThreadSafe(canonized)) {
+      // cache the compiled expressions
+      cache.get(canonized)
+    } else {
+      // Don't cache the compiled expressions
+      create(canonized)
+    }
+  }
 
   /**
    * Create a new codegen context for expression evaluator, used to store those
