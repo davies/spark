@@ -315,8 +315,14 @@ private[spark] object SQLConf {
     defaultValue = Some(false),
     doc = "When true, input files for multiple partitions will be listed in parallel in any " +
       "partitioned Hive table backed by Hadoop storage such as HDFS and S3.  The parallelism " +
-      "is controlled by \"mapreduce.input.fileinputformat.list-status.num-threads\"."
-  )
+      "is controlled by \"mapreduce.input.fileinputformat.list-status.num-threads\".")
+
+  val HIVE_S3_BULK_LISTING_ENABLED = booleanConf("spark.sql.hive.s3BulkListing",
+    defaultValue = Some(false),
+    doc = "When true, input files in partitioned Hive table will be listed using AmazonS3Client " +
+      "listNextBatchOfObjects.  S3 bulk listing is particularly faster than S3N listStatus when " +
+      "listing a large number of files.  Note this property must be used with " +
+      "\"spark.sql.hive.parallelFileListing\" together.")
 
   val HIVE_VERIFY_PARTITION_PATH = booleanConf("spark.sql.hive.verifyPartitionPath",
     defaultValue = Some(false),
@@ -480,6 +486,8 @@ private[sql] class SQLConf extends Serializable with CatalystConf {
   private[spark] def orcFilterPushDown: Boolean = getConf(ORC_FILTER_PUSHDOWN_ENABLED)
 
   private[spark] def parallelFileListing: Boolean = getConf(HIVE_PARALLEL_FILE_LISTING_ENABLED)
+
+  private[spark] def s3BulkListing: Boolean = getConf(HIVE_S3_BULK_LISTING_ENABLED)
 
   private[spark] def verifyPartitionPath: Boolean = getConf(HIVE_VERIFY_PARTITION_PATH)
 
