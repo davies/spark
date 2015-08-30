@@ -256,8 +256,8 @@ class HadoopTableReader(
   }
 
   /**
-   * If `spark.sql.hive.parallelFileListing` is true, then pre-calculate input splits for all the partitions
-   * together that will be cached in HadoopRDDs.
+   * If `spark.sql.hive.parallelFileListing` is true, then pre-calculate input splits for all the
+   * partitions together that can be cached in HadoopRDDs.
    */
   private def populateInputSplitsCache(
       hivePartitions: Map[HivePartition, Class[_ <: Deserializer]],
