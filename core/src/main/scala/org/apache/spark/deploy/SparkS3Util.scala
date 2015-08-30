@@ -36,14 +36,13 @@ import org.apache.hadoop.fs.s3.S3Credentials
 import org.apache.hadoop.io.compress.{SplittableCompressionCodec, CompressionCodecFactory}
 import org.apache.hadoop.mapred.{FileSplit, InputSplit, JobConf}
 
-import org.apache.spark.Logging
+import org.apache.spark.{SparkConf, Logging}
 import org.apache.spark.annotation.DeveloperApi
 import org.apache.spark.util.Utils
 
-import com.google.common.base.Preconditions
-import com.google.common.base.Strings
+import com.google.common.base.{Preconditions, Strings}
 import com.google.common.cache.{Cache, CacheBuilder}
-import com.google.common.collect.{Iterators, AbstractSequentialIterator}
+import com.google.common.collect.AbstractSequentialIterator
 
 /**
  * :: DeveloperApi ::
@@ -51,16 +50,19 @@ import com.google.common.collect.{Iterators, AbstractSequentialIterator}
  */
 @DeveloperApi
 object SparkS3Util extends Logging {
-  private val conf: Configuration = SparkHadoopUtil.get.conf
+  private val sparkConf = new SparkConf()
+  val conf: Configuration = SparkHadoopUtil.get.newConfiguration(sparkConf)
+
   private val s3ClientCache: Cache[String, AmazonS3Client] = CacheBuilder
     .newBuilder
+    .concurrencyLevel(Runtime.getRuntime.availableProcessors)
     .build[String, AmazonS3Client]
 
-  private val S3_SSL_ENABLED: String = "spark.s3.ssl.enabled"
   private val S3_CONNECT_TIMEOUT: String = "spark.s3.connect.timeout"
   private val S3_MAX_CONNECTIONS: String = "spark.s3.max.connections"
   private val S3_MAX_ERROR_RETRIES: String = "spark.s3.max.error.retries"
   private val S3_SOCKET_TIMEOUT: String = "spark.s3.socket.timeout"
+  private val S3_SSL_ENABLED: String = "spark.s3.ssl.enabled"
   private val S3_USE_INSTANCE_CREDENTIALS: String = "spark.s3.use.instance.credentials"
 
   private val FILEINPUTFORMAT_INPUTDIR: String =
@@ -76,7 +78,7 @@ object SparkS3Util extends Logging {
     val connectTimeout: Int = conf.getInt(S3_CONNECT_TIMEOUT, 5000)
     val socketTimeout: Int = conf.getInt(S3_SOCKET_TIMEOUT, 5000)
     val maxConnections: Int = conf.getInt(S3_MAX_CONNECTIONS, 500)
-    val useInstanceCredentials: Boolean = conf.getBoolean(S3_USE_INSTANCE_CREDENTIALS, true)
+    val useInstanceCredentials: Boolean = conf.getBoolean(S3_USE_INSTANCE_CREDENTIALS, false)
 
     val clientConf: ClientConfiguration = new ClientConfiguration
     clientConf.setMaxErrorRetry(maxErrorRetries)
@@ -85,25 +87,33 @@ object SparkS3Util extends Logging {
     clientConf.setSocketTimeout(socketTimeout)
     clientConf.setMaxConnections(maxConnections)
 
-    val s3RoleArn: String = Option(conf.get("aws.iam.role.arn"))
-      .getOrElse(conf.get("aws.iam.role.arn.default"))
+    val s3RoleArn = Option(conf.get("aws.iam.role.arn"))
+    val s3RoleArnDefault = Option(conf.get("aws.iam.role.arn.default"))
     val credentialsProvider: AWSCredentialsProvider =
-      if (s3RoleArn != null) {
-        new STSAssumeRoleSessionCredentialsProvider(
-          s3RoleArn, "RoleSessionName-" + Utils.random.nextInt)
-      } else {
-        try {
-          val credentials: S3Credentials = new S3Credentials
-          credentials.initialize(URI.create("s3n://" + bucket), conf)
-          new StaticCredentialsProvider(
-            new BasicAWSCredentials(credentials.getAccessKey, credentials.getSecretAccessKey))
-        } catch {
-          case _: IllegalArgumentException => // Ignore
-        }
-        if (useInstanceCredentials) {
+      s3RoleArn match {
+        case Some(role) =>
+          logDebug("Use user-specified IAM role: " + role)
+          new STSAssumeRoleSessionCredentialsProvider(
+            role, "RoleSessionName-" + Utils.random.nextInt)
+        case None if useInstanceCredentials =>
+          logDebug("Use IAM role associated with the instance")
           new InstanceProfileCredentialsProvider
-        } else {
-          throw new RuntimeException("S3 credentials not configured")
+        case _ =>
+          s3RoleArnDefault match {
+            case Some(role) =>
+              logDebug("Use default IAM role configured in Hadoop config: " + role)
+              new STSAssumeRoleSessionCredentialsProvider(
+                role, "RoleSessionName-" + Utils.random.nextInt)
+            case _ =>
+              try {
+                logDebug("Use AWS key pairs")
+                val credentials: S3Credentials = new S3Credentials
+                credentials.initialize(URI.create(bucket), conf)
+                new StaticCredentialsProvider(
+                  new BasicAWSCredentials(credentials.getAccessKey, credentials.getSecretAccessKey))
+              } catch {
+                case e: Exception => throw new RuntimeException("S3 credentials not configured", e)
+              }
         }
       }
 
@@ -141,10 +151,10 @@ object SparkS3Util extends Logging {
   }
 
   private def listPrefix(s3: AmazonS3Client, path: Path): Iterator[LocatedFileStatus] = {
+    val uri: URI = path.toUri
     val key: String = keyFromPath(path)
-    val bucket: String = path.toUri.getAuthority
     val request: ListObjectsRequest = new ListObjectsRequest()
-      .withBucketName(bucket)
+      .withBucketName(uri.getAuthority)
       .withPrefix(key)
 
     val listings = new AbstractSequentialIterator[ObjectListing](s3.listObjects(request)) {
@@ -156,9 +166,10 @@ object SparkS3Util extends Logging {
       }
     }.asScala
 
-    Iterators.concat[LocatedFileStatus] {
-      listings.flatMap(listing => statusFromObjects(bucket, listing.getObjectSummaries)).asJava
-    }.asScala
+    val bucket: String = uri.getScheme + "://" + uri.getAuthority
+    listings
+      .map(listing => statusFromObjects(bucket, listing.getObjectSummaries))
+      .reduceLeft(_ ++ _)
   }
 
   private def statusFromObjects(
@@ -171,7 +182,7 @@ object SparkS3Util extends Logging {
         val status: FileStatus = new FileStatus(
           obj.getSize, false, 1, blockSize,
           obj.getLastModified.getTime,
-          new Path("s3n://" + bucket + "/" + obj.getKey))
+          new Path(bucket + "/" + obj.getKey))
         list += createLocatedFileStatus(status)
       }
     }
@@ -238,14 +249,22 @@ object SparkS3Util extends Logging {
     }
   }
 
+  /**
+   * This is based on `FileInputFormat.getSplits` method. Two key differences are:
+   *   1) Use `AmazonS3Client.listObjects` instead of `FileSystem.listStatus`.
+   *   2) Bypass computing data locality hints since they'er irrelevent to S3 objects.
+   */
   def getSplits(conf: JobConf, minSplits: Int): Array[InputSplit] = {
     val inputDirs: Array[String] = conf.get(FILEINPUTFORMAT_INPUTDIR).split(",")
     val files: Array[FileStatus] = inputDirs.toList
-      .groupBy[String](URI.create(_).getAuthority)
+      .groupBy[String] { path =>
+        val uri = URI.create(path)
+        uri.getScheme + "://" + uri.getAuthority
+      }
       .mapValues[String](f = commonPrefix)
       .map { case (bucket, prefix) => (bucket, listStatus(getS3Client(bucket), prefix)) }
       .mapValues[Array[FileStatus]] { arr => filterFileStatus(arr, inputDirs) }
-      .values.foldLeft[Array[FileStatus]](Array[FileStatus]()) { (sum, arr) => sum ++ arr }
+      .values.reduceLeft(_ ++ _)
     conf.setLong(FILEINPUTFORMAT_NUMINPUTFILES, files.length)
 
     val totalSize: Long = files.foldLeft(0L) { (sum, file) => sum + file.getLen }

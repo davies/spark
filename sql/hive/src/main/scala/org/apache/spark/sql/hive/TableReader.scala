@@ -34,7 +34,7 @@ import org.apache.hadoop.util.ReflectionUtils
 
 import org.apache.spark.Logging
 import org.apache.spark.broadcast.Broadcast
-import org.apache.spark.deploy.{SparkHadoopUtil, SparkS3Util}
+import org.apache.spark.deploy.SparkS3Util
 import org.apache.spark.rdd.{EmptyRDD, HadoopRDD, RDD, UnionRDD}
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions._
@@ -187,58 +187,7 @@ class HadoopTableReader(
     }
 
     val hivePartitions = verifyPartitionPath(partitionToDeserializer)
-
-    // This map holds input splits per Hive partition path.
-    val inputSplitsCache = collection.mutable.Map[String, ArrayBuffer[InputSplit]]()
-
-    // Compute input splits for all the partitions together if they have the same input format.
-    // This is faster than computing them individually because listing multiple input dirs can be
-    // done in parallel using "mapreduce.input.fileinputformat.list-status.num-threads".
-    if (sc.conf.parallelFileListing) {
-      val inputFormatClass = hivePartitions.head._1.getInputFormatClass
-      val homogeneousInputFormat = hivePartitions.forall {
-        case (part, _) => part.getInputFormatClass == inputFormatClass
-      }
-
-      if (homogeneousInputFormat) {
-        val jobConf = new JobConf(hiveExtraConf)
-        val minPartitions = _minSplitsPerRDD * hivePartitions.size
-        val combinedPaths = hivePartitions.map { case (part, _) =>
-          applyFilterIfNeeded(part.getDataLocation, filterOpt)
-        }.mkString(",")
-
-        HadoopTableReader.initializeLocalJobConfFunc(combinedPaths, relation.tableDesc)(jobConf)
-        SparkHadoopUtil.get.addCredentials(jobConf)
-
-        val inputSplits =
-          // If Hive table is stored on S3, we can use S3 bulk listing to speed up listing
-          // even further. This is particularly faster when listing a large number of files
-          // on S3.
-          if (sc.conf.s3BulkListing) {
-            SparkS3Util.getSplits(jobConf, minPartitions)
-          } else {
-            val inputFormat = ReflectionUtils
-              .newInstance(inputFormatClass, jobConf)
-              .asInstanceOf[FileInputFormat[_, _]]
-            inputFormat.getSplits(jobConf, minPartitions)
-          }
-
-        val groupedInputSplits = inputSplits.groupBy(_.asInstanceOf[FileSplit].getPath.getParent)
-        for (path <- combinedPaths.split(",")) {
-          val cache = inputSplitsCache.get(path).getOrElse {
-            val emptyArray: ArrayBuffer[InputSplit] = ArrayBuffer()
-            inputSplitsCache.put(path, emptyArray)
-            emptyArray
-          }
-          for ((key, values) <- groupedInputSplits) {
-            if (key.toString.startsWith(path)) {
-              cache ++= values
-            }
-          }
-        }
-      }
-    }
-
+    val inputSplitsCache = populateInputSplitsCache(hivePartitions, filterOpt)
     val hivePartitionRDDs = hivePartitions.map { case (partition, partDeserializer) =>
       val partDesc = Utilities.getPartitionDesc(partition)
       val partPath = partition.getDataLocation
@@ -303,6 +252,68 @@ class HadoopTableReader(
       new EmptyRDD[InternalRow](sc.sparkContext)
     } else {
       new UnionRDD(hivePartitionRDDs(0).context, hivePartitionRDDs)
+    }
+  }
+
+  /**
+   * If `spark.sql.hive.parallelFileListing` is true, then pre-calculate input splits for all the partitions
+   * together that will be cached in HadoopRDDs.
+   */
+  private def populateInputSplitsCache(
+      hivePartitions: Map[HivePartition, Class[_ <: Deserializer]],
+      filterOpt: Option[PathFilter]): Map[String, Array[InputSplit]] = {
+    if (hivePartitions.isEmpty) {
+      Map[String, Array[InputSplit]]()
+    } else {
+      val inputSplitsCache = collection.mutable.Map[String, ArrayBuffer[InputSplit]]()
+      // Compute input splits for all the partitions together if they have the same input format.
+      // This is faster than computing them individually because listing multiple input dirs can be
+      // done in parallel using `mapreduce.input.fileinputformat.list-status.num-threads`.
+      if (sc.conf.parallelFileListing) {
+        val inputFormatClass = relation.hiveQlTable.getInputFormatClass
+        val homogeneousInputFormat = hivePartitions.forall {
+          case (part, _) => part.getInputFormatClass == inputFormatClass
+        }
+
+        if (homogeneousInputFormat) {
+          val jobConf = new JobConf(hiveExtraConf)
+          val minPartitions = _minSplitsPerRDD * hivePartitions.size
+          val combinedPaths = hivePartitions.map { case (part, _) =>
+            applyFilterIfNeeded(part.getDataLocation, filterOpt)
+          }.mkString(",")
+
+          HadoopTableReader.initializeLocalJobConfFunc(combinedPaths, relation.tableDesc)(jobConf)
+
+          val inputSplits =
+          // If Hive table is stored on S3, we can use S3 bulk listing to speed up listing
+          // even further. This is particularly faster when listing a large number of files
+          // on S3.
+            if (sc.conf.s3BulkListing) {
+              SparkS3Util.getSplits(jobConf, minPartitions)
+            } else {
+              val inputFormat = ReflectionUtils
+                .newInstance(inputFormatClass, jobConf)
+                .asInstanceOf[FileInputFormat[_, _]]
+              inputFormat.getSplits(jobConf, minPartitions)
+            }
+
+          val groupedInputSplits = inputSplits.groupBy(_.asInstanceOf[FileSplit].getPath.getParent)
+          for (path <- combinedPaths.split(",")) {
+            val cache = inputSplitsCache.get(path).getOrElse {
+              val emptyArray: ArrayBuffer[InputSplit] = ArrayBuffer()
+              inputSplitsCache.put(path, emptyArray)
+              emptyArray
+            }
+            for ((key, values) <- groupedInputSplits) {
+              if (key.toString.startsWith(path)) {
+                cache ++= values
+              }
+            }
+          }
+        }
+      }
+
+      inputSplitsCache.mapValues(_.toArray).toMap
     }
   }
 
