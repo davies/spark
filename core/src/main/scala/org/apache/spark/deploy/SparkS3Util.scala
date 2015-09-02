@@ -73,12 +73,12 @@ object SparkS3Util extends Logging {
     "mapreduce.input.fileinputformat.split.minsize"
 
   private def getS3Client(bucket: String): AmazonS3Client = {
-    val sslEnabled: Boolean = conf.getBoolean(S3_SSL_ENABLED, true)
-    val maxErrorRetries: Int = conf.getInt(S3_MAX_ERROR_RETRIES, 10)
-    val connectTimeout: Int = conf.getInt(S3_CONNECT_TIMEOUT, 5000)
-    val socketTimeout: Int = conf.getInt(S3_SOCKET_TIMEOUT, 5000)
-    val maxConnections: Int = conf.getInt(S3_MAX_CONNECTIONS, 500)
-    val useInstanceCredentials: Boolean = conf.getBoolean(S3_USE_INSTANCE_CREDENTIALS, false)
+    val sslEnabled: Boolean = sparkConf.getBoolean(S3_SSL_ENABLED, true)
+    val maxErrorRetries: Int = sparkConf.getInt(S3_MAX_ERROR_RETRIES, 10)
+    val connectTimeout: Int = sparkConf.getInt(S3_CONNECT_TIMEOUT, 5000)
+    val socketTimeout: Int = sparkConf.getInt(S3_SOCKET_TIMEOUT, 5000)
+    val maxConnections: Int = sparkConf.getInt(S3_MAX_CONNECTIONS, 500)
+    val useInstanceCredentials: Boolean = sparkConf.getBoolean(S3_USE_INSTANCE_CREDENTIALS, false)
 
     val clientConf: ClientConfiguration = new ClientConfiguration
     clientConf.setMaxErrorRetry(maxErrorRetries)
@@ -252,10 +252,10 @@ object SparkS3Util extends Logging {
   /**
    * This is based on `FileInputFormat.getSplits` method. Two key differences are:
    *   1) Use `AmazonS3Client.listObjects` instead of `FileSystem.listStatus`.
-   *   2) Bypass computing data locality hints since they'er irrelevent to S3 objects.
+   *   2) Bypass data locality hints since they're irrelevant to S3 objects.
    */
-  def getSplits(conf: JobConf, minSplits: Int): Array[InputSplit] = {
-    val inputDirs: Array[String] = conf.get(FILEINPUTFORMAT_INPUTDIR).split(",")
+  def getSplits(jobConf: JobConf, minSplits: Int): Array[InputSplit] = {
+    val inputDirs: Array[String] = jobConf.get(FILEINPUTFORMAT_INPUTDIR).split(",")
     val files: Array[FileStatus] = inputDirs.toList
       .groupBy[String] { path =>
         val uri = URI.create(path)
@@ -265,17 +265,17 @@ object SparkS3Util extends Logging {
       .map { case (bucket, prefix) => (bucket, listStatus(getS3Client(bucket), prefix)) }
       .mapValues[Array[FileStatus]] { arr => filterFileStatus(arr, inputDirs) }
       .values.reduceLeft(_ ++ _)
-    conf.setLong(FILEINPUTFORMAT_NUMINPUTFILES, files.length)
+    jobConf.setLong(FILEINPUTFORMAT_NUMINPUTFILES, files.length)
 
     val totalSize: Long = files.foldLeft(0L) { (sum, file) => sum + file.getLen }
     val goalSize: Long = totalSize / (if (minSplits == 0) 1 else minSplits)
-    val minSize: Long = conf.getLong(FILEINPUTFORMAT_SPLIT_MINSIZE, 1)
+    val minSize: Long = jobConf.getLong(FILEINPUTFORMAT_SPLIT_MINSIZE, 1)
     val splits: ArrayBuffer[InputSplit] = ArrayBuffer[InputSplit]()
     val fakeHosts: Array[String] = Array()
     for (file <- files) {
       val path: Path = file.getPath
       val length: Long = file.getLen
-      if (length > 0 && isSplitable(conf, path)) {
+      if (length > 0 && isSplitable(jobConf, path)) {
         val blockSize: Long = file.getBlockSize
         val splitSize: Long = Math.max(minSize, Math.min(goalSize, blockSize))
         var bytesRemaining: Long = length
