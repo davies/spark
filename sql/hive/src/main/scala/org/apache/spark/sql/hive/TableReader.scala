@@ -17,8 +17,6 @@
 
 package org.apache.spark.sql.hive
 
-import scala.collection.mutable.ArrayBuffer
-
 import org.apache.hadoop.fs.{Path, PathFilter}
 import org.apache.hadoop.hive.conf.HiveConf
 import org.apache.hadoop.hive.metastore.api.hive_metastoreConstants._
@@ -29,12 +27,10 @@ import org.apache.hadoop.hive.serde2.Deserializer
 import org.apache.hadoop.hive.serde2.objectinspector.primitive._
 import org.apache.hadoop.hive.serde2.objectinspector.{ObjectInspectorConverters, StructObjectInspector}
 import org.apache.hadoop.io.Writable
-import org.apache.hadoop.mapred.{FileInputFormat, FileSplit, InputFormat, InputSplit, JobConf}
-import org.apache.hadoop.util.ReflectionUtils
+import org.apache.hadoop.mapred.{FileInputFormat, InputFormat, JobConf}
 
 import org.apache.spark.Logging
 import org.apache.spark.broadcast.Broadcast
-import org.apache.spark.deploy.SparkS3Util
 import org.apache.spark.rdd.{EmptyRDD, HadoopRDD, RDD, UnionRDD}
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions._
@@ -186,9 +182,8 @@ class HadoopTableReader(
       }
     }
 
-    val hivePartitions = verifyPartitionPath(partitionToDeserializer)
-    val inputSplitsCache = populateInputSplitsCache(hivePartitions, filterOpt)
-    val hivePartitionRDDs = hivePartitions.map { case (partition, partDeserializer) =>
+    val hivePartitionRDDs = verifyPartitionPath(partitionToDeserializer)
+      .map { case (partition, partDeserializer) =>
       val partDesc = Utilities.getPartitionDesc(partition)
       val partPath = partition.getDataLocation
       val inputPathStr = applyFilterIfNeeded(partPath, filterOpt)
@@ -231,9 +226,7 @@ class HadoopTableReader(
       // Fill all partition keys to the given MutableRow object
       fillPartitionKeys(partValues, mutableRow)
 
-      val inputSplits = inputSplitsCache.get(inputPathStr).map(_.toArray)
-
-      createHadoopRdd(tableDesc, inputPathStr, ifc, inputSplits).mapPartitions { iter =>
+      createHadoopRdd(tableDesc, inputPathStr, ifc).mapPartitions { iter =>
         val hconf = broadcastedHiveConf.value.value
         val deserializer = localDeserializer.newInstance()
         deserializer.initialize(hconf, partProps)
@@ -252,68 +245,6 @@ class HadoopTableReader(
       new EmptyRDD[InternalRow](sc.sparkContext)
     } else {
       new UnionRDD(hivePartitionRDDs(0).context, hivePartitionRDDs)
-    }
-  }
-
-  /**
-   * If `spark.sql.hive.parallelFileListing` is true, then pre-calculate input splits for all the
-   * partitions together that can be cached in HadoopRDDs.
-   */
-  private def populateInputSplitsCache(
-      hivePartitions: Map[HivePartition, Class[_ <: Deserializer]],
-      filterOpt: Option[PathFilter]): Map[String, Array[InputSplit]] = {
-    if (hivePartitions.isEmpty) {
-      Map[String, Array[InputSplit]]()
-    } else {
-      val inputSplitsCache = collection.mutable.Map[String, ArrayBuffer[InputSplit]]()
-      // Compute input splits for all the partitions together if they have the same input format.
-      // This is faster than computing them individually because listing multiple input dirs can be
-      // done in parallel using `mapreduce.input.fileinputformat.list-status.num-threads`.
-      if (sc.conf.parallelFileListing) {
-        val inputFormatClass = relation.hiveQlTable.getInputFormatClass
-        val homogeneousInputFormat = hivePartitions.forall {
-          case (part, _) => part.getInputFormatClass == inputFormatClass
-        }
-
-        if (homogeneousInputFormat) {
-          val jobConf = new JobConf(hiveExtraConf)
-          val minPartitions = _minSplitsPerRDD * hivePartitions.size
-          val combinedPaths = hivePartitions.map { case (part, _) =>
-            applyFilterIfNeeded(part.getDataLocation, filterOpt)
-          }.mkString(",")
-
-          HadoopTableReader.initializeLocalJobConfFunc(combinedPaths, relation.tableDesc)(jobConf)
-
-          val inputSplits =
-            // If Hive table is stored on S3, we can use S3 bulk listing to speed up listing
-            // even further. This is particularly faster when listing a large number of files
-            // on S3.
-            if (sc.conf.s3BulkListing) {
-              SparkS3Util.getSplits(jobConf, minPartitions)
-            } else {
-              val inputFormat = ReflectionUtils
-                .newInstance(inputFormatClass, jobConf)
-                .asInstanceOf[FileInputFormat[_, _]]
-              inputFormat.getSplits(jobConf, minPartitions)
-            }
-
-          val groupedInputSplits = inputSplits.groupBy(_.asInstanceOf[FileSplit].getPath.getParent)
-          for (path <- combinedPaths.split(",")) {
-            val cache = inputSplitsCache.get(path).getOrElse {
-              val emptyArray: ArrayBuffer[InputSplit] = ArrayBuffer()
-              inputSplitsCache.put(path, emptyArray)
-              emptyArray
-            }
-            for ((key, values) <- groupedInputSplits) {
-              if (key.toString.startsWith(path)) {
-                cache ++= values
-              }
-            }
-          }
-        }
-      }
-
-      inputSplitsCache.mapValues(_.toArray).toMap
     }
   }
 
@@ -338,8 +269,7 @@ class HadoopTableReader(
   private def createHadoopRdd(
     tableDesc: TableDesc,
     path: String,
-    inputFormatClass: Class[InputFormat[Writable, Writable]],
-    inputSplitsCache: Option[Array[InputSplit]] = None): RDD[Writable] = {
+    inputFormatClass: Class[InputFormat[Writable, Writable]]): RDD[Writable] = {
 
     val initializeJobConfFunc = HadoopTableReader.initializeLocalJobConfFunc(path, tableDesc) _
 
@@ -350,8 +280,7 @@ class HadoopTableReader(
       inputFormatClass,
       classOf[Writable],
       classOf[Writable],
-      _minSplitsPerRDD,
-      inputSplitsCache)
+      _minSplitsPerRDD)
 
     // Only take the value (skip the key) because Hive works only with values.
     rdd.map(_._2)
@@ -364,7 +293,7 @@ private[hive] object HadoopTableReader extends HiveInspectors with Logging {
    * instantiate a HadoopRDD.
    */
   def initializeLocalJobConfFunc(path: String, tableDesc: TableDesc)(jobConf: JobConf) {
-    FileInputFormat.setInputPaths(jobConf, path.split(",").map(new Path(_)): _*)
+    FileInputFormat.setInputPaths(jobConf, Seq[Path](new Path(path)): _*)
     if (tableDesc != null) {
       PlanUtils.configureInputJobPropertiesForStorageHandler(tableDesc)
       Utilities.copyTableJobPropertiesToConf(tableDesc, jobConf)

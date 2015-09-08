@@ -17,6 +17,7 @@
 
 package org.apache.spark.rdd
 
+import java.net.URI
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.io.EOFException
@@ -41,7 +42,7 @@ import org.apache.hadoop.util.ReflectionUtils
 import org.apache.spark._
 import org.apache.spark.annotation.DeveloperApi
 import org.apache.spark.broadcast.Broadcast
-import org.apache.spark.deploy.SparkHadoopUtil
+import org.apache.spark.deploy.{SparkS3Util, SparkHadoopUtil}
 import org.apache.spark.executor.DataReadMethod
 import org.apache.spark.rdd.HadoopRDD.HadoopMapPartitionsWithSplitRDD
 import org.apache.spark.util.{SerializableConfiguration, ShutdownHookManager, NextIterator, Utils}
@@ -105,8 +106,7 @@ class HadoopRDD[K, V](
     inputFormatClass: Class[_ <: InputFormat[K, V]],
     keyClass: Class[K],
     valueClass: Class[V],
-    minPartitions: Int,
-    @transient inputSplitsCache: Option[Array[InputSplit]] = None)
+    minPartitions: Int)
   extends RDD[(K, V)](sc, Nil) with Logging {
 
   if (initLocalJobConfFuncOpt.isDefined) {
@@ -198,15 +198,18 @@ class HadoopRDD[K, V](
   }
 
   override def getPartitions: Array[Partition] = {
-    // First check whether input splits are already computed
-    val inputSplits: Array[InputSplit] = inputSplitsCache.getOrElse {
-      val jobConf = getJobConf()
-      // Add the credentials here as this can be called before SparkContext initialized
-      SparkHadoopUtil.get.addCredentials(jobConf)
-      val inputFormat = getInputFormat(jobConf)
-      if (inputFormat.isInstanceOf[Configurable]) {
-        inputFormat.asInstanceOf[Configurable].setConf(jobConf)
-      }
+    val jobConf = getJobConf()
+    // Add the credentials here as this can be called before SparkContext initialized
+    SparkHadoopUtil.get.addCredentials(jobConf)
+    val inputFormat = getInputFormat(jobConf)
+    if (inputFormat.isInstanceOf[Configurable]) {
+      inputFormat.asInstanceOf[Configurable].setConf(jobConf)
+    }
+    val inputdir = jobConf.get("mapreduce.input.fileinputformat.inputdir")
+    val uri = URI.create(inputdir)
+    val inputSplits = if (uri.getScheme.startsWith("s3")) {
+      SparkS3Util.getSplits(jobConf, minPartitions)
+    } else {
       inputFormat.getSplits(jobConf, minPartitions)
     }
     val array = new Array[Partition](inputSplits.size)
