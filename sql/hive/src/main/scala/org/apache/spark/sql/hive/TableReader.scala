@@ -285,9 +285,9 @@ class HadoopTableReader(
           HadoopTableReader.initializeLocalJobConfFunc(combinedPaths, relation.tableDesc)(jobConf)
 
           val inputSplits =
-          // If Hive table is stored on S3, we can use S3 bulk listing to speed up listing
-          // even further. This is particularly faster when listing a large number of files
-          // on S3.
+            // If Hive table is stored on S3, we can use S3 bulk listing to speed up listing
+            // even further. This is particularly faster when listing a large number of files
+            // on S3.
             if (sc.conf.s3BulkListing) {
               SparkS3Util.getSplits(jobConf, minPartitions)
             } else {

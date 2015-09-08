@@ -23,9 +23,12 @@ import java.util
 
 import scala.collection.JavaConverters._
 import scala.collection.mutable.ArrayBuffer
+import scala.collection.parallel.ForkJoinTaskSupport
+import scala.collection.parallel.mutable.ParArray
+import scala.concurrent.forkjoin.ForkJoinPool
 
-import com.amazonaws.{AmazonClientException, Protocol, ClientConfiguration}
-import com.amazonaws.auth.{InstanceProfileCredentialsProvider, BasicAWSCredentials, STSAssumeRoleSessionCredentialsProvider, AWSCredentialsProvider}
+import com.amazonaws.{AmazonClientException, ClientConfiguration, Protocol}
+import com.amazonaws.auth.{AWSCredentialsProvider, BasicAWSCredentials, InstanceProfileCredentialsProvider, STSAssumeRoleSessionCredentialsProvider}
 import com.amazonaws.internal.StaticCredentialsProvider
 import com.amazonaws.services.s3.AmazonS3Client
 import com.amazonaws.services.s3.model.{ListObjectsRequest, ObjectListing, S3ObjectSummary}
@@ -33,7 +36,7 @@ import com.amazonaws.services.s3.model.{ListObjectsRequest, ObjectListing, S3Obj
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.{BlockLocation, FileStatus, LocatedFileStatus, Path, RemoteIterator}
 import org.apache.hadoop.fs.s3.S3Credentials
-import org.apache.hadoop.io.compress.{SplittableCompressionCodec, CompressionCodecFactory}
+import org.apache.hadoop.io.compress.{CompressionCodecFactory, SplittableCompressionCodec}
 import org.apache.hadoop.mapred.{FileSplit, InputSplit, JobConf}
 
 import org.apache.spark.{SparkConf, Logging}
@@ -67,6 +70,8 @@ object SparkS3Util extends Logging {
 
   private val FILEINPUTFORMAT_INPUTDIR: String =
     "mapreduce.input.fileinputformat.inputdir"
+  private val FILEINPUTFORMAT_LIST_STATUS_NUM_THREADS: String =
+    "mapreduce.input.fileinputformat.list-status.num-threads"
   private val FILEINPUTFORMAT_NUMINPUTFILES: String =
     "mapreduce.input.fileinputformat.numinputfiles"
   private val FILEINPUTFORMAT_SPLIT_MINSIZE: String =
@@ -126,15 +131,6 @@ object SparkS3Util extends Logging {
       val newClient = new AmazonS3Client(credentialsProvider, clientConf)
       s3ClientCache.put(s3ClientKey, newClient)
       newClient
-    }
-  }
-
-  private def commonPrefix(prefixes: List[String]): String = {
-    if (prefixes.isEmpty || prefixes.contains("")) ""
-    else prefixes.head.head match {
-      case ch =>
-        if (prefixes.tail.forall(_.head == ch)) "" + ch + commonPrefix(prefixes.map(_.tail))
-        else ""
     }
   }
 
@@ -218,25 +214,24 @@ object SparkS3Util extends Logging {
     }
   }
 
-  private def listStatus(s3: AmazonS3Client, path: String): Array[FileStatus] = {
-    val list: ArrayBuffer[LocatedFileStatus] = ArrayBuffer()
-    val iterator: RemoteIterator[LocatedFileStatus] = listLocatedStatus(s3, new Path(path))
-    while (iterator.hasNext) {
-      list += iterator.next
-    }
-    list.toArray
-  }
-
-  private def filterFileStatus(
-      unfiltered: Array[FileStatus],
-      inputDirs: Array[String]): Array[FileStatus] = {
-    val filtered: ArrayBuffer[FileStatus] = ArrayBuffer()
-    for (fileStatus <- unfiltered; inputDir <- inputDirs) {
-      if (fileStatus.getPath.toString.startsWith(inputDir)) {
-        filtered += fileStatus
+  /**
+   * List paths in parallel and merge returned `FileStatus` objects into a single list.
+   */
+  private def listStatus(
+      s3: AmazonS3Client,
+      paths: List[String],
+      parallelism: Int): Array[FileStatus] = {
+    val list: ArrayBuffer[FileStatus] = ArrayBuffer()
+    val parArray: ParArray[String] = paths.toParArray
+    parArray.tasksupport = new ForkJoinTaskSupport(new ForkJoinPool(parallelism))
+    parArray
+      .map { path => listLocatedStatus(s3, new Path(path)) }
+      .toArray.foreach { iterator =>
+        while (iterator.hasNext) {
+          list += iterator.next
+        }
       }
-    }
-    filtered.toArray
+    list.toArray
   }
 
   private def isSplitable(conf: JobConf, file: Path): Boolean = {
@@ -255,15 +250,14 @@ object SparkS3Util extends Logging {
    *   2) Bypass data locality hints since they're irrelevant to S3 objects.
    */
   def getSplits(jobConf: JobConf, minSplits: Int): Array[InputSplit] = {
+    val parallelism: Int = jobConf.getInt(FILEINPUTFORMAT_LIST_STATUS_NUM_THREADS, 1)
     val inputDirs: Array[String] = jobConf.get(FILEINPUTFORMAT_INPUTDIR).split(",")
     val files: Array[FileStatus] = inputDirs.toList
       .groupBy[String] { path =>
         val uri = URI.create(path)
         uri.getScheme + "://" + uri.getAuthority
       }
-      .mapValues[String](f = commonPrefix)
-      .map { case (bucket, prefix) => (bucket, listStatus(getS3Client(bucket), prefix)) }
-      .mapValues[Array[FileStatus]] { arr => filterFileStatus(arr, inputDirs) }
+      .map { case (bucket, paths) => (bucket, listStatus(getS3Client(bucket), paths, parallelism)) }
       .values.reduceLeft(_ ++ _)
     jobConf.setLong(FILEINPUTFORMAT_NUMINPUTFILES, files.length)
 
