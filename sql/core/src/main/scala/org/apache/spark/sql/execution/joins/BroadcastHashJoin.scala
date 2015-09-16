@@ -23,10 +23,11 @@ import scala.concurrent.duration._
 import org.apache.spark.annotation.DeveloperApi
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.catalyst.expressions.Expression
+import org.apache.spark.sql.catalyst.expressions.{BoundReference, BindReferences, Expression}
+import org.apache.spark.sql.catalyst.expressions.codegen.{GenerateUnsafeProjection, ExpressionCanonicalizer, GeneratedExpressionCode, CodeGenContext}
 import org.apache.spark.sql.catalyst.plans.physical.{Distribution, Partitioning, UnspecifiedDistribution}
-import org.apache.spark.sql.execution.{BinaryNode, SQLExecution, SparkPlan}
 import org.apache.spark.sql.execution.metric.SQLMetrics
+import org.apache.spark.sql.execution.{BinaryNode, SQLExecution, SparkPlan}
 import org.apache.spark.util.ThreadUtils
 import org.apache.spark.{InternalAccumulator, TaskContext}
 
@@ -119,6 +120,48 @@ case class BroadcastHashJoin(
       }
       hashJoin(streamedIter, numStreamedRows, hashedRelation, numOutputRows)
     }
+  }
+
+  override def supportCodeGen: Boolean = true
+
+  override def produce(ctx: CodeGenContext, parent: SparkPlan): (RDD[InternalRow], String) = {
+    calledParent = parent
+    streamedPlan.produce(ctx, this)
+  }
+
+  override def consume(ctx: CodeGenContext, child: SparkPlan, columns: Seq[GeneratedExpressionCode]): String = {
+    val exprs = streamedKeys.map(x =>
+      ExpressionCanonicalizer.execute(BindReferences.bindReference(x, streamedPlan.output)))
+    val key = GenerateUnsafeProjection.createCode(ctx, exprs)
+    val buildRow = ctx.freshName("buildRow")
+
+    val relation = ctx.freshName("relation")
+    val broadcastRelation = Await.result(broadcastFuture, timeout)
+    val relationIndex = ctx.broadcasts.size
+    ctx.broadcasts += broadcastRelation
+    val relationType = classOf[UnsafeHashedRelation].getName
+    ctx.addMutableState(relationType, relation, s"$relation = ($relationType) objects[$relationIndex];")
+
+    val buildExpr = buildPlan.schema.zipWithIndex.map { case (f, i) =>
+      new BoundReference(i, f.dataType, f.nullable)
+    }
+    ctx.currentVars = null
+    ctx.currentRowTerm = buildRow
+    val buildColumns = buildExpr.map(_.gen(ctx))
+    val output = buildSide match {
+      case BuildLeft => buildColumns ++ columns
+      case BuildRight => columns ++ buildColumns
+    }
+    s"""
+       | ${key.code}
+       |
+       | InternalRow $buildRow = $relation.getOne(${key.primitive});
+       | if ($buildRow != null) {
+       |   ${buildColumns.map(_.code).mkString("\n")}
+       |
+       |   ${genNext(ctx, output)}
+       | }
+     """.stripMargin
   }
 }
 

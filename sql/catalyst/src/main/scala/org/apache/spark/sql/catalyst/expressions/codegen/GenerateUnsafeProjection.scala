@@ -120,7 +120,7 @@ object GenerateUnsafeProjection extends CodeGenerator[Seq[Expression], UnsafePro
    * @param inputs could be the codes for expressions or input struct fields.
    * @param inputTypes types of the inputs
    */
-  private def createCodeForStruct(
+  def createCodeForStruct(
       ctx: CodeGenContext,
       row: String,
       inputs: Seq[GeneratedExpressionCode],
@@ -419,12 +419,12 @@ object GenerateUnsafeProjection extends CodeGenerator[Seq[Expression], UnsafePro
 
         private $exprType[] expressions;
 
-        ${declareMutableStates(ctx)}
-        ${declareAddedFunctions(ctx)}
+        ${ctx.declareMutableStates()}
+        ${ctx.declareAddedFunctions()}
 
         public SpecificUnsafeProjection($exprType[] expressions) {
           this.expressions = expressions;
-          ${initMutableStates(ctx)}
+          ${ctx.initMutableStates()}
         }
 
         // Scala.Function1 need this
@@ -441,7 +441,7 @@ object GenerateUnsafeProjection extends CodeGenerator[Seq[Expression], UnsafePro
 
     logDebug(s"code for ${expressions.mkString(",")}:\n${CodeFormatter.format(code)}")
 
-    val c = compile(code)
+    val c = CodeGenerator.compile(code)
     c.generate(ctx.references.toArray).asInstanceOf[UnsafeProjection]
   }
 }

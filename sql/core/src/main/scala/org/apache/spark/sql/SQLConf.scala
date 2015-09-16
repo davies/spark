@@ -234,6 +234,12 @@ private[spark] object SQLConf {
       " a specific query.",
     isPublic = false)
 
+  val WHOLESTAGE_CODEGEN_ENABLED = booleanConf("spark.sql.codegen.wholeStage",
+    defaultValue = Some(false),
+    doc = "When true, the whole stage (of multiple operators) will be compiled into single java" +
+      " method",
+    isPublic = false)
+
   val UNSAFE_ENABLED = booleanConf("spark.sql.unsafe.enabled",
     defaultValue = Some(true),  // use TUNGSTEN_ENABLED as default
     doc = "When true, use the new optimized Tungsten physical execution backend.",
@@ -481,6 +487,8 @@ private[sql] class SQLConf extends Serializable with CatalystConf {
   private[spark] def sortMergeJoinEnabled: Boolean = getConf(SORTMERGE_JOIN)
 
   private[spark] def codegenEnabled: Boolean = getConf(CODEGEN_ENABLED, getConf(TUNGSTEN_ENABLED))
+
+  private[spark] def wholeStageEnabled: Boolean = getConf(WHOLESTAGE_CODEGEN_ENABLED)
 
   def caseSensitiveAnalysis: Boolean = getConf(SQLConf.CASE_SENSITIVE)
 

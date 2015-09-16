@@ -67,12 +67,25 @@ case class BoundReference(ordinal: Int, dataType: DataType, nullable: Boolean)
   override def exprId: ExprId = throw new UnsupportedOperationException
 
   override def genCode(ctx: CodeGenContext, ev: GeneratedExpressionCode): String = {
-    val javaType = ctx.javaType(dataType)
-    val value = ctx.getValue("i", dataType, ordinal.toString)
-    s"""
-      boolean ${ev.isNull} = i.isNullAt($ordinal);
-      $javaType ${ev.primitive} = ${ev.isNull} ? ${ctx.defaultValue(dataType)} : ($value);
-    """
+    if (ctx.currentVars != null) {
+      ev.isNull = ctx.currentVars(ordinal).isNull
+      ev.primitive = ctx.currentVars(ordinal).primitive
+      ""
+    } else if (!nullable) {
+      val javaType = ctx.javaType(dataType)
+      val value = ctx.getValue(ctx.currentRowTerm, dataType, ordinal.toString)
+      ev.isNull = "false"
+      s"""
+        $javaType ${ev.primitive} = $value;
+      """
+    } else {
+      val javaType = ctx.javaType(dataType)
+      val value = ctx.getValue(ctx.currentRowTerm, dataType, ordinal.toString)
+      s"""
+        boolean ${ev.isNull} = ${ctx.currentRowTerm}.isNullAt($ordinal);
+        $javaType ${ev.primitive} = ${ev.isNull} ? ${ctx.defaultValue(dataType)} : ($value);
+      """
+    }
   }
 }
 

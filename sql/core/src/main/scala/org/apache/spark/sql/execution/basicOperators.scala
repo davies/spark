@@ -21,17 +21,13 @@ import org.apache.spark.annotation.DeveloperApi
 import org.apache.spark.rdd.{PartitionwiseSampledRDD, RDD, ShuffledRDD}
 import org.apache.spark.shuffle.sort.SortShuffleManager
 import org.apache.spark.sql.Row
-import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.catalyst.CatalystTypeConverters
-import org.apache.spark.sql.catalyst.errors._
+import org.apache.spark.sql.catalyst.expressions.codegen.{ExpressionCanonicalizer, GeneratedExpressionCode, CodeGenContext}
+import org.apache.spark.sql.catalyst.{CatalystTypeConverters, InternalRow}
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.plans.physical._
 import org.apache.spark.sql.execution.metric.SQLMetrics
-import org.apache.spark.sql.types.StructType
-import org.apache.spark.util.collection.ExternalSorter
-import org.apache.spark.util.collection.unsafe.sort.PrefixComparator
+import org.apache.spark.util.MutablePair
 import org.apache.spark.util.random.PoissonSampler
-import org.apache.spark.util.{CompletionIterator, MutablePair}
 import org.apache.spark.{HashPartitioner, SparkEnv}
 
 /**
@@ -81,6 +77,25 @@ case class TungstenProject(projectList: Seq[NamedExpression], child: SparkPlan) 
     case CreateNamedStruct(children) => CreateNamedStructUnsafe(children)
   })
 
+  override def supportCodeGen: Boolean = true
+
+  override def produce(ctx: CodeGenContext, parent: SparkPlan): (RDD[InternalRow], String) = {
+    calledParent = parent
+    child.produce(ctx, this)
+  }
+
+  override def consume(ctx: CodeGenContext, child: SparkPlan, columns: Seq[GeneratedExpressionCode]): String = {
+    val exprs = projectList.map(x =>
+      ExpressionCanonicalizer.execute(BindReferences.bindReference(x, child.output)))
+    val output = exprs.map(_.gen(ctx))
+    val sources = output.map(_.code).mkString("\n")
+    s"""
+       | $sources
+       |
+       | ${genNext(ctx, output)}
+     """.stripMargin
+  }
+
   protected override def doExecute(): RDD[InternalRow] = {
     val numRows = longMetric("numRows")
     child.execute().mapPartitions { iter =>
@@ -106,6 +121,24 @@ case class Filter(condition: Expression, child: SparkPlan) extends UnaryNode {
   private[sql] override lazy val metrics = Map(
     "numInputRows" -> SQLMetrics.createLongMetric(sparkContext, "number of input rows"),
     "numOutputRows" -> SQLMetrics.createLongMetric(sparkContext, "number of output rows"))
+
+  override def supportCodeGen: Boolean = true
+
+  override def produce(ctx: CodeGenContext, parent: SparkPlan): (RDD[InternalRow], String) = {
+    calledParent = parent
+    child.produce(ctx, this)
+  }
+
+  override def consume(ctx: CodeGenContext, child: SparkPlan, columns: Seq[GeneratedExpressionCode]): String = {
+    val expr = ExpressionCanonicalizer.execute(BindReferences.bindReference(condition, child.output))
+    val eval = expr.gen(ctx)
+    s"""
+       | ${eval.code}
+       | if (!${eval.isNull} && ${eval.primitive}) {
+       |   ${genNext(ctx, columns)}
+       | }
+     """.stripMargin
+  }
 
   protected override def doExecute(): RDD[InternalRow] = {
     val numInputRows = longMetric("numInputRows")

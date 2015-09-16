@@ -44,7 +44,7 @@ object DefaultOptimizer extends Optimizer {
       SetOperationPushDown,
       SamplePushDown,
       PushPredicateThroughJoin,
-      PushPredicateThroughProject,
+      //PushPredicateThroughProject,
       PushPredicateThroughGenerate,
       ColumnPruning,
       // Operator combine

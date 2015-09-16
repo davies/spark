@@ -24,16 +24,14 @@ import scala.collection.mutable.ArrayBuffer
 import org.apache.spark.Logging
 import org.apache.spark.annotation.DeveloperApi
 import org.apache.spark.rdd.{RDD, RDDOperationScope}
-import org.apache.spark.sql.SQLContext
-import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.catalyst.CatalystTypeConverters
 import org.apache.spark.sql.catalyst.expressions._
-import org.apache.spark.sql.Row
 import org.apache.spark.sql.catalyst.expressions.codegen._
 import org.apache.spark.sql.catalyst.plans.QueryPlan
 import org.apache.spark.sql.catalyst.plans.physical._
-import org.apache.spark.sql.execution.metric.{LongSQLMetric, SQLMetric, SQLMetrics}
+import org.apache.spark.sql.catalyst.{CatalystTypeConverters, InternalRow}
+import org.apache.spark.sql.execution.metric.{LongSQLMetric, SQLMetric}
 import org.apache.spark.sql.types.DataType
+import org.apache.spark.sql.{Row, SQLContext}
 
 object SparkPlan {
   protected[sql] val currentContext = new ThreadLocal[SQLContext]()
@@ -137,7 +135,11 @@ abstract class SparkPlan extends QueryPlan[SparkPlan] with Logging with Serializ
     }
     RDDOperationScope.withScope(sparkContext, nodeName, false, true) {
       prepare()
-      doExecute()
+      if (sqlContext.conf.wholeStageEnabled && supportCodeGen) {
+        doCodeGen()
+      } else {
+        doExecute()
+      }
     }
   }
 
@@ -166,6 +168,96 @@ abstract class SparkPlan extends QueryPlan[SparkPlan] with Logging with Serializ
    * Produces the result of the query as an RDD[InternalRow]
    */
   protected def doExecute(): RDD[InternalRow]
+
+  protected def supportCodeGen: Boolean = false
+
+  protected def doCodeGen(): RDD[InternalRow] = {
+    val ctx = new CodeGenContext
+    val (rdd, code) = produce(ctx, null)
+    val exprType: String = classOf[Expression].getName
+    val references = ctx.references.toArray
+    val broadcasts = ctx.broadcasts.toArray
+    val source = s"""
+       | public Object generate($exprType[] exprs, Object[] objs) {
+       |   return new GeneratedIterator(exprs, objs);
+       | }
+       |
+       | class GeneratedIterator extends org.apache.spark.sql.execution.BufferedIterator2 {
+       |
+       |   private $exprType[] expressions;
+       |   private Object[] objects;
+       |
+       |   ${ctx.declareMutableStates()}
+       |
+       |   public GeneratedIterator($exprType[] exprs, Object[] objs) {
+       |     expressions = exprs;
+       |     objects = objs;
+       |
+       |     ${ctx.initMutableStates()}
+       |   }
+       |
+       |   protected void processNext() {
+       |     $code
+       |   }
+       | }
+     """.stripMargin
+    // try to compile
+    println(s"${CodeFormatter.format(source)}")
+    val clazz = CodeGenerator.compile(CodeFormatter.format(source))
+
+    rdd.mapPartitions { iter =>
+      val clazz = CodeGenerator.compile(source)
+      val objects = broadcasts.map(_.value)
+      val buffer = clazz.generate(references, objects).asInstanceOf[BufferedIterator2]
+      buffer.process(iter)
+      new Iterator[InternalRow] {
+        override def hasNext: Boolean = buffer.hasNext
+        override def next: InternalRow = buffer.next()
+      }
+    }
+  }
+
+  var calledParent: SparkPlan = null
+
+  def produce(ctx: CodeGenContext, parent: SparkPlan): (RDD[InternalRow], String) = {
+    calledParent = parent
+    val exprs = output.zipWithIndex.map(x => new BoundReference(x._2, x._1.dataType, true))
+    val columns = exprs.map(_.gen(ctx))
+    val accesses = columns.map(_.code).mkString("\n")
+    val code = s"""
+       |  while (input.hasNext()) {
+       |   InternalRow i = (InternalRow) input.next();
+       |   $accesses
+       |   ${genNext(ctx, columns)}
+       | }
+     """.stripMargin
+    (doExecute(), code)
+  }
+
+  def genNext(ctx: CodeGenContext, columns: Seq[GeneratedExpressionCode]): String = {
+    columns.foreach {c =>
+      c.code = ""
+    }
+    ctx.currentVars = columns.toArray
+    if (calledParent != null) {
+      calledParent.consume(ctx, this, columns)
+    } else {
+      consume0(ctx, null, columns)
+    }
+  }
+
+  def consume(ctx: CodeGenContext, child: SparkPlan, columns: Seq[GeneratedExpressionCode]): String = {
+    ""
+  }
+
+  def consume0(ctx: CodeGenContext, child: SparkPlan, columns: Seq[GeneratedExpressionCode]): String = {
+    val code = GenerateUnsafeProjection.createCodeForStruct(ctx, "i", columns, output.map(_.dataType))
+    s"""
+       | ${code.code}
+       | currentRow = ${code.primitive};
+       | return;
+     """.stripMargin
+  }
 
   /**
    * Runs this query returning the result as an array.

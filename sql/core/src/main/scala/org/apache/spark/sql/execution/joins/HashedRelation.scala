@@ -41,6 +41,9 @@ import org.apache.spark.{SparkConf, SparkEnv}
  */
 private[execution] sealed trait HashedRelation {
   def get(key: InternalRow): Seq[InternalRow]
+  def getOne(key: InternalRow): InternalRow = {
+    get(key)(0)
+  }
 
   // This is a helper method to implement Externalizable, and is used by
   // GeneralHashedRelation and UniqueKeyHashedRelation
@@ -96,6 +99,10 @@ final class UniqueKeyHashedRelation(private var hashTable: JavaHashMap[InternalR
   override def get(key: InternalRow): Seq[InternalRow] = {
     val v = hashTable.get(key)
     if (v eq null) null else CompactBuffer(v)
+  }
+
+  override def getOne(key: InternalRow): InternalRow = {
+    hashTable.get(key)
   }
 
   def getValue(key: InternalRow): InternalRow = hashTable.get(key)
@@ -248,6 +255,41 @@ private[joins] final class UnsafeHashedRelation(
     } else {
       // Use the Java HashMap in local mode or for non-broadcast joins (e.g. ShuffleHashJoin)
       hashTable.get(unsafeKey)
+    }
+  }
+
+  override def getOne(key: InternalRow): InternalRow = {
+    val unsafeKey = key.asInstanceOf[UnsafeRow]
+
+    if (binaryMap != null) {
+      // Used in Broadcast join
+      val map = binaryMap  // avoid the compiler error
+      val loc = new map.Location  // this could be allocated in stack
+      binaryMap.safeLookup(unsafeKey.getBaseObject, unsafeKey.getBaseOffset,
+        unsafeKey.getSizeInBytes, loc)
+      if (loc.isDefined) {
+        val base = loc.getValueAddress.getBaseObject
+        var offset = loc.getValueAddress.getBaseOffset
+        val last = loc.getValueAddress.getBaseOffset + loc.getValueLength
+        val numFields = Platform.getInt(base, offset)
+        val sizeInBytes = Platform.getInt(base, offset + 4)
+        offset += 8
+        val row = new UnsafeRow
+        row.pointTo(base, offset, numFields, sizeInBytes)
+        offset += sizeInBytes
+        row
+      } else {
+        null
+      }
+
+    } else {
+      // Use the Java HashMap in local mode or for non-broadcast joins (e.g. ShuffleHashJoin)
+      val rs = hashTable.get(unsafeKey)
+      if (rs == null) {
+        null
+      } else {
+        rs(0)
+      }
     }
   }
 

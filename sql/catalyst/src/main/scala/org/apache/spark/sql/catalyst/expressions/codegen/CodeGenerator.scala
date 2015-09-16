@@ -25,11 +25,12 @@ import com.google.common.cache.{CacheBuilder, CacheLoader}
 import org.codehaus.janino.ClassBodyEvaluator
 
 import org.apache.spark.Logging
+import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.types._
 import org.apache.spark.unsafe.Platform
-import org.apache.spark.unsafe.types._
+import org.apache.spark.unsafe.types.{CalendarInterval, UTF8String}
 
 
 // These classes are here to avoid issues with serialization and integration with quasiquotes.
@@ -59,6 +60,12 @@ class CodeGenContext {
    */
   val references: mutable.ArrayBuffer[Expression] = new mutable.ArrayBuffer[Expression]()
 
+  val broadcasts: mutable.ArrayBuffer[Broadcast[_]] = new mutable.ArrayBuffer[Broadcast[_]]()
+
+  var currentVars: Array[GeneratedExpressionCode] = null
+
+  var currentRowTerm: String = "i"
+
   /**
    * Holding expressions' mutable states like `MonotonicallyIncreasingID.count` as a
    * 3-tuple: java type, variable name, code to init it.
@@ -81,6 +88,16 @@ class CodeGenContext {
     mutableStates += ((javaType, variableName, initCode))
   }
 
+  def declareMutableStates(): String = {
+    mutableStates.map { case (javaType, variableName, _) =>
+      s"private $javaType $variableName;"
+    }.mkString("\n")
+  }
+
+  def initMutableStates(): String = {
+    mutableStates.map(_._3).mkString("\n")
+  }
+
   /**
    * Holding all the functions those will be added into generated class.
    */
@@ -89,6 +106,10 @@ class CodeGenContext {
 
   def addNewFunction(funcName: String, funcCode: String): Unit = {
     addedFunctions += ((funcName, funcCode))
+  }
+
+  def declareAddedFunctions(): String = {
+    addedFunctions.map { case (funcName, funcCode) => funcCode }.mkString("\n")
   }
 
   final val JAVA_BOOLEAN = "boolean"
@@ -311,54 +332,17 @@ class CodeGenContext {
  * A wrapper for generated class, defines a `generate` method so that we can pass extra objects
  * into generated class.
  */
-abstract class GeneratedClass {
-  def generate(expressions: Array[Expression]): Any
+class GeneratedClass {
+  def generate(expressions: Array[Expression]): Any = null
+  def generate(expressions: Array[Expression], objects: Array[Any]): Any = null
 }
 
-/**
- * A base class for generators of byte code to perform expression evaluation.  Includes a set of
- * helpers for referring to Catalyst types and building trees that perform evaluation of individual
- * expressions.
- */
-abstract class CodeGenerator[InType <: AnyRef, OutType <: AnyRef] extends Logging {
-
-  protected val exprType: String = classOf[Expression].getName
-  protected val mutableRowType: String = classOf[MutableRow].getName
-  protected val genericMutableRowType: String = classOf[GenericMutableRow].getName
-
-  protected def declareMutableStates(ctx: CodeGenContext): String = {
-    ctx.mutableStates.map { case (javaType, variableName, _) =>
-      s"private $javaType $variableName;"
-    }.mkString("\n")
-  }
-
-  protected def initMutableStates(ctx: CodeGenContext): String = {
-    ctx.mutableStates.map(_._3).mkString("\n")
-  }
-
-  protected def declareAddedFunctions(ctx: CodeGenContext): String = {
-    ctx.addedFunctions.map { case (funcName, funcCode) => funcCode }.mkString("\n")
-  }
-
-  /**
-   * Generates a class for a given input expression.  Called when there is not cached code
-   * already available.
-   */
-  protected def create(in: InType): OutType
-
-  /**
-   * Canonicalizes an input expression. Used to avoid double caching expressions that differ only
-   * cosmetically.
-   */
-  protected def canonicalize(in: InType): InType
-
-  /** Binds an input expression to a given input schema */
-  protected def bind(in: InType, inputSchema: Seq[Attribute]): InType
+object CodeGenerator extends Logging {
 
   /**
    * Compile the Java source code into a Java class, using Janino.
    */
-  protected def compile(code: String): GeneratedClass = {
+  def compile(code: String): GeneratedClass = {
     cache.get(code)
   }
 
@@ -416,6 +400,33 @@ abstract class CodeGenerator[InType <: AnyRef, OutType <: AnyRef] extends Loggin
           result
         }
       })
+}
+
+/**
+ * A base class for generators of byte code to perform expression evaluation.  Includes a set of
+ * helpers for referring to Catalyst types and building trees that perform evaluation of individual
+ * expressions.
+ */
+abstract class CodeGenerator[InType <: AnyRef, OutType <: AnyRef] extends Logging {
+
+  protected val exprType: String = classOf[Expression].getName
+  protected val mutableRowType: String = classOf[MutableRow].getName
+  protected val genericMutableRowType: String = classOf[GenericMutableRow].getName
+
+  /**
+   * Generates a class for a given input expression.  Called when there is not cached code
+   * already available.
+   */
+  protected def create(in: InType): OutType
+
+  /**
+   * Canonicalizes an input expression. Used to avoid double caching expressions that differ only
+   * cosmetically.
+   */
+  protected def canonicalize(in: InType): InType
+
+  /** Binds an input expression to a given input schema */
+  protected def bind(in: InType, inputSchema: Seq[Attribute]): InType
 
   /** Generates the requested evaluator binding the given expression(s) to the inputSchema. */
   def generate(expressions: InType, inputSchema: Seq[Attribute]): OutType =

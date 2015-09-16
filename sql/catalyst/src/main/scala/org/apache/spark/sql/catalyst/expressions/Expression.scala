@@ -275,9 +275,18 @@ abstract class UnaryExpression extends Expression {
       ctx: CodeGenContext,
       ev: GeneratedExpressionCode,
       f: String => String): String = {
-    nullSafeCodeGen(ctx, ev, eval => {
-      s"${ev.primitive} = ${f(eval)};"
-    })
+    if (nullable) {
+      nullSafeCodeGen(ctx, ev, eval => {
+        s"${ev.primitive} = ${f(eval)};"
+      })
+    } else {
+      val eval = child.gen(ctx)
+      val resultCode = f(eval.primitive)
+      ev.isNull = "false"
+      eval.code + s"""
+      final ${ctx.javaType(dataType)} ${ev.primitive} = $resultCode;
+      """
+    }
   }
 
   /**
@@ -293,13 +302,21 @@ abstract class UnaryExpression extends Expression {
       f: String => String): String = {
     val eval = child.gen(ctx)
     val resultCode = f(eval.primitive)
-    eval.code + s"""
+    if (nullable) {
+      eval.code + s"""
       boolean ${ev.isNull} = ${eval.isNull};
       ${ctx.javaType(dataType)} ${ev.primitive} = ${ctx.defaultValue(dataType)};
       if (!${ev.isNull}) {
         $resultCode
       }
     """
+    } else {
+      ev.isNull = "false"
+      eval.code + s"""
+      ${ctx.javaType(dataType)} ${ev.primitive} = ${ctx.defaultValue(dataType)};
+      $resultCode
+    """
+    }
   }
 }
 
@@ -376,7 +393,8 @@ abstract class BinaryExpression extends Expression {
     val eval1 = left.gen(ctx)
     val eval2 = right.gen(ctx)
     val resultCode = f(eval1.primitive, eval2.primitive)
-    s"""
+    if (nullable) {
+      s"""
       ${eval1.code}
       boolean ${ev.isNull} = ${eval1.isNull};
       ${ctx.javaType(dataType)} ${ev.primitive} = ${ctx.defaultValue(dataType)};
@@ -389,6 +407,15 @@ abstract class BinaryExpression extends Expression {
         }
       }
     """
+    } else {
+      ev.isNull = "false"
+      s"""
+      ${eval1.code}
+      ${eval2.code}
+      ${ctx.javaType(dataType)} ${ev.primitive} = ${ctx.defaultValue(dataType)};
+      $resultCode
+    """
+    }
   }
 }
 

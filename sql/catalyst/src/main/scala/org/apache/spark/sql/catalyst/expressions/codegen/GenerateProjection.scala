@@ -161,12 +161,12 @@ object GenerateProjection extends CodeGenerator[Seq[Expression], Projection] {
 
     class SpecificProjection extends ${classOf[BaseProjection].getName} {
       private $exprType[] expressions;
-      ${declareMutableStates(ctx)}
-      ${declareAddedFunctions(ctx)}
+      ${ctx.declareMutableStates()}
+      ${ctx.declareAddedFunctions()}
 
       public SpecificProjection($exprType[] expr) {
         expressions = expr;
-        ${initMutableStates(ctx)}
+        ${ctx.initMutableStates()}
       }
 
       @Override
@@ -238,6 +238,6 @@ object GenerateProjection extends CodeGenerator[Seq[Expression], Projection] {
     logDebug(s"MutableRow, initExprs: ${expressions.mkString(",")} code:\n" +
       CodeFormatter.format(code))
 
-    compile(code).generate(ctx.references.toArray).asInstanceOf[Projection]
+    CodeGenerator.compile(code).generate(ctx.references.toArray).asInstanceOf[Projection]
   }
 }

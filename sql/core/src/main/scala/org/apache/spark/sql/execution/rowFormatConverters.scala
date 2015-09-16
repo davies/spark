@@ -21,6 +21,7 @@ import org.apache.spark.annotation.DeveloperApi
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions._
+import org.apache.spark.sql.catalyst.expressions.codegen.{CodeGenContext, GeneratedExpressionCode}
 import org.apache.spark.sql.catalyst.plans.physical.Partitioning
 import org.apache.spark.sql.catalyst.rules.Rule
 
@@ -39,6 +40,18 @@ case class ConvertToUnsafe(child: SparkPlan) extends UnaryNode {
   override def outputsUnsafeRows: Boolean = true
   override def canProcessUnsafeRows: Boolean = false
   override def canProcessSafeRows: Boolean = true
+
+  override def supportCodeGen: Boolean = true
+
+  override def produce(ctx: CodeGenContext, parent: SparkPlan): (RDD[InternalRow], String) = {
+    calledParent = parent
+    child.produce(ctx, this)
+  }
+
+  override def consume(ctx: CodeGenContext, child: SparkPlan, columns: Seq[GeneratedExpressionCode]): String = {
+    genNext(ctx, columns)
+  }
+
   override protected def doExecute(): RDD[InternalRow] = {
     child.execute().mapPartitions { iter =>
       val convertToUnsafe = UnsafeProjection.create(child.schema)
@@ -64,6 +77,17 @@ case class ConvertToSafe(child: SparkPlan) extends UnaryNode {
       val convertToSafe = FromUnsafeProjection(child.output.map(_.dataType))
       iter.map(convertToSafe)
     }
+  }
+
+  override def supportCodeGen: Boolean = true
+
+  override def produce(ctx: CodeGenContext, parent: SparkPlan): (RDD[InternalRow], String) = {
+    calledParent = parent
+    child.produce(ctx, this)
+  }
+
+  override def consume(ctx: CodeGenContext, child: SparkPlan, columns: Seq[GeneratedExpressionCode]): String = {
+    genNext(ctx, columns)
   }
 }
 
