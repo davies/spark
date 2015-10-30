@@ -234,7 +234,11 @@ public final class UnsafeExternalSorter extends MemoryConsumer {
     return allocatedPages.size();
   }
 
+  /**
+   * Free the borrowed in-memory sorter.
+   */
   public void freeImMemorySorter() {
+    // the memory used by it is not acquired by `this`, do not need to release here.
     inMemSorter = null;
   }
 
