@@ -34,8 +34,6 @@ import org.apache.spark.memory.TaskMemoryManager;
 import org.apache.spark.storage.BlockManager;
 import org.apache.spark.unsafe.Platform;
 import org.apache.spark.unsafe.array.ByteArrayMethods;
-import org.apache.spark.unsafe.array.LongArray;
-import org.apache.spark.unsafe.bitset.BitSet;
 import org.apache.spark.unsafe.hash.Murmur3_x86_32;
 import org.apache.spark.unsafe.memory.MemoryBlock;
 import org.apache.spark.unsafe.memory.MemoryLocation;
@@ -107,7 +105,7 @@ public final class BytesToBytesMap extends MemoryConsumer {
    * Position {@code 2 * i} in the array is used to track a pointer to the key at index {@code i},
    * while position {@code 2 * i + 1} in the array holds key's full 32-bit hashcode.
    */
-  @Nullable private LongArray longArray;
+  @Nullable private long[] longArray;
   // TODO: we're wasting 32 bits of space here; we can probably store fewer bits of the hashcode
   // and exploit word-alignment to use fewer bits to hold the address.  This might let us store
   // only one long per map entry, increasing the chance that this array will fit in cache at the
@@ -122,12 +120,6 @@ public final class BytesToBytesMap extends MemoryConsumer {
    * Whether or not the longArray can grow. We will not insert more elements if it's false.
    */
   private boolean canGrowArray = true;
-
-  /**
-   * A {@link BitSet} used to track location of the map where the key is set.
-   * Size of the bitset should be half of the size of the long array.
-   */
-  @Nullable private BitSet bitset;
 
   private final double loadFactor;
 
@@ -427,7 +419,6 @@ public final class BytesToBytesMap extends MemoryConsumer {
    * This is a thread-safe version of `lookup`, could be used by multiple threads.
    */
   public void safeLookup(Object keyBase, long keyOffset, int keyLength, Location loc) {
-    assert(bitset != null);
     assert(longArray != null);
 
     if (enablePerfMetrics) {
@@ -440,12 +431,12 @@ public final class BytesToBytesMap extends MemoryConsumer {
       if (enablePerfMetrics) {
         numProbes++;
       }
-      if (!bitset.isSet(pos)) {
+      if (longArray[pos * 2] == 0) {
         // This is a new key.
         loc.with(pos, hashcode, false);
         return;
       } else {
-        long stored = longArray.get(pos * 2 + 1);
+        long stored = longArray[pos * 2 + 1];
         if ((int) (stored) == hashcode) {
           // Full hash code matches.  Let's compare the keys for equality.
           loc.with(pos, hashcode, true);
@@ -525,7 +516,7 @@ public final class BytesToBytesMap extends MemoryConsumer {
       this.isDefined = isDefined;
       this.keyHashcode = keyHashcode;
       if (isDefined) {
-        final long fullKeyAddress = longArray.get(pos * 2);
+        final long fullKeyAddress = longArray[pos * 2];
         updateAddressesAndSizes(fullKeyAddress);
       }
       return this;
@@ -644,7 +635,6 @@ public final class BytesToBytesMap extends MemoryConsumer {
       assert (!isDefined) : "Can only set value once for a key";
       assert (keyLength % 8 == 0);
       assert (valueLength % 8 == 0);
-      assert(bitset != null);
       assert(longArray != null);
 
       if (numElements == MAX_CAPACITY || !canGrowArray) {
@@ -678,15 +668,14 @@ public final class BytesToBytesMap extends MemoryConsumer {
       Platform.putInt(base, offset, Platform.getInt(base, offset) + 1);
       pageCursor += recordLength;
       numElements++;
-      bitset.set(pos);
       final long storedKeyAddress = taskMemoryManager.encodePageNumberAndOffset(
         currentPage, recordOffset);
-      longArray.set(pos * 2, storedKeyAddress);
-      longArray.set(pos * 2 + 1, keyHashcode);
+      longArray[pos * 2] = storedKeyAddress;
+      longArray[pos * 2 + 1] = keyHashcode;
       updateAddressesAndSizes(storedKeyAddress);
       isDefined = true;
 
-      if (numElements > growthThreshold && longArray.size() < MAX_CAPACITY) {
+      if (numElements > growthThreshold && longArray.length / 2 < MAX_CAPACITY) {
         try {
           growAndRehash();
         } catch (OutOfMemoryError oom) {
@@ -733,9 +722,7 @@ public final class BytesToBytesMap extends MemoryConsumer {
     capacity = Math.max((int) Math.min(MAX_CAPACITY, ByteArrayMethods.nextPowerOf2(capacity)), 64);
     assert (capacity <= MAX_CAPACITY);
     acquireMemory(capacity * 16);
-    longArray = new LongArray(MemoryBlock.fromLongArray(new long[capacity * 2]));
-    bitset = new BitSet(MemoryBlock.fromLongArray(new long[capacity / 64]));
-
+    longArray = new long[capacity * 2];
     this.growthThreshold = (int) (capacity * loadFactor);
     this.mask = capacity - 1;
   }
@@ -746,10 +733,9 @@ public final class BytesToBytesMap extends MemoryConsumer {
   public void freeArray() {
     updatePeakMemoryUsed();
     if (longArray != null) {
-      long used = longArray.memoryBlock().size();
+      long used = longArray.length * 8;
       longArray = null;
       releaseMemory(used);
-      bitset = null;
     }
   }
 
@@ -796,8 +782,7 @@ public final class BytesToBytesMap extends MemoryConsumer {
       totalDataPagesSize += dataPage.size();
     }
     return totalDataPagesSize +
-      ((bitset != null) ? bitset.memoryBlock().size() : 0L) +
-      ((longArray != null) ? longArray.memoryBlock().size() : 0L);
+      ((longArray != null) ? longArray.length * 8L : 0L);
   }
 
   private void updatePeakMemoryUsed() {
@@ -852,7 +837,6 @@ public final class BytesToBytesMap extends MemoryConsumer {
    */
   @VisibleForTesting
   void growAndRehash() {
-    assert(bitset != null);
     assert(longArray != null);
 
     long resizeStartTime = -1;
@@ -860,45 +844,48 @@ public final class BytesToBytesMap extends MemoryConsumer {
       resizeStartTime = System.nanoTime();
     }
     // Store references to the old data structures to be used when we re-hash
-    final LongArray oldLongArray = longArray;
-    final BitSet oldBitSet = bitset;
-    final int oldCapacity = (int) oldBitSet.capacity();
-
-    // Allocate the new data structures
-    try {
-      allocate(Math.min(growthStrategy.nextCapacity(oldCapacity), MAX_CAPACITY));
-    } catch (OutOfMemoryError oom) {
-      longArray = oldLongArray;
-      bitset = oldBitSet;
-      throw oom;
-    }
+    final long[] oldLongArray = longArray;
+    allocate(Math.min(growthStrategy.nextCapacity(longArray.length / 2), MAX_CAPACITY));
 
     // Re-mask (we don't recompute the hashcode because we stored all 32 bits of it)
-    for (int pos = oldBitSet.nextSetBit(0); pos >= 0; pos = oldBitSet.nextSetBit(pos + 1)) {
-      final long keyPointer = oldLongArray.get(pos * 2);
-      final int hashcode = (int) oldLongArray.get(pos * 2 + 1);
+    for (int pos = 0; pos < oldLongArray.length; pos += 2) {
+      final long keyPointer = oldLongArray[pos];
+      final int hashcode = (int) oldLongArray[pos + 1];
       int newPos = hashcode & mask;
       int step = 1;
-      boolean keepGoing = true;
-
-      // No need to check for equality here when we insert so this has one less if branch than
-      // the similar code path in addWithoutResize.
-      while (keepGoing) {
-        if (!bitset.isSet(newPos)) {
-          bitset.set(newPos);
-          longArray.set(newPos * 2, keyPointer);
-          longArray.set(newPos * 2 + 1, hashcode);
-          keepGoing = false;
-        } else {
-          newPos = (newPos + step) & mask;
-          step++;
-        }
+      while (longArray[newPos * 2] != 0) {
+        newPos = (newPos + step) & mask;
+        step++;
       }
+      longArray[newPos * 2] = keyPointer;
+      longArray[newPos * 2 + 1] = hashcode;
     }
-    releaseMemory(oldLongArray.memoryBlock().size());
+
+    releaseMemory(oldLongArray.length * 8L);
 
     if (enablePerfMetrics) {
       timeSpentResizingNs += System.nanoTime() - resizeStartTime;
     }
+  }
+
+  /**
+   * Return the compacted long array.
+   */
+  public long[] getCompactArray() {
+    // compact the longArray
+    int r = longArray.length - 2;  // last non-empty pos
+    int l = 0;  // first empty pos
+    while (l < r) {
+      while (longArray[r] == 0 && r > l) r -= 2;
+      while (longArray[l] != 0 && l < r) l += 2;
+      if (r <= l) {
+        break;
+      }
+      longArray[l] = longArray[r];
+      longArray[r] = 0;
+      longArray[l + 1] = longArray[r + 1];
+      longArray[r + 1] = 0;
+    }
+    return longArray;
   }
 }

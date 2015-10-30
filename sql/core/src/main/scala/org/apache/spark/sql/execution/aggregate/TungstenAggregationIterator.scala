@@ -494,7 +494,8 @@ class TungstenAggregationIterator(
   // it first uses hash-based aggregation by putting groups and their buffers in
   // hashMap. If we could not allocate more memory for the map, we switch to
   // sort-based aggregation (by calling switchToSortBasedAggregation).
-  private def processInputs(): Unit = {
+  private def processInputs(fallbackStartsAt: Int): Unit = {
+    var i = 0
     if (groupingExpressions.isEmpty) {
       // If there is no grouping expressions, we can just reuse the same buffer over and over again.
       // Note that it would be better to eliminate the hash map entirely in the future.
@@ -506,12 +507,14 @@ class TungstenAggregationIterator(
         processRow(buffer, newInput)
       }
     } else {
+
       while (inputIter.hasNext) {
         val newInput = inputIter.next()
         numInputRows += 1
         val groupingKey = groupProjection.apply(newInput)
-        val buffer: UnsafeRow = hashMap.getAggregationBufferFromUnsafeRow(groupingKey)
-        if (buffer == null) {
+        var buffer: UnsafeRow = hashMap.getAggregationBufferFromUnsafeRow(groupingKey)
+        if (buffer == null || i == fallbackStartsAt) {
+          i = 0
           val sorter = hashMap.destructAndCreateExternalSorter()
           if (externalSorter == null) {
             externalSorter = sorter
@@ -520,49 +523,20 @@ class TungstenAggregationIterator(
             sorter.cleanupResources()
           }
           hashMap = createHashMap()
+          buffer = hashMap.getAggregationBufferFromUnsafeRow(groupingKey)
+          assert(buffer != null)
         }
         processRow(buffer, newInput)
+        i += 1
       }
 
       if (externalSorter != null) {
+        val sorter = hashMap.destructAndCreateExternalSorter()
+        externalSorter.merge(sorter)
+        sorter.cleanupResources()
+
         switchToSortBasedAggregation()
       }
-    }
-  }
-
-  // This function is only used for testing. It basically the same as processInputs except
-  // that it switch to sort-based aggregation after `fallbackStartsAt` input rows have
-  // been processed.
-  private def processInputsWithControlledFallback(fallbackStartsAt: Int): Unit = {
-    var i = 0
-    while (inputIter.hasNext) {
-      val newInput = inputIter.next()
-      numInputRows += 1
-      val groupingKey = groupProjection.apply(newInput)
-      val buffer: UnsafeRow = if (i < fallbackStartsAt) {
-        hashMap.getAggregationBufferFromUnsafeRow(groupingKey)
-      } else {
-        null
-      }
-      if (buffer == null) {
-        val sorter = hashMap.destructAndCreateExternalSorter()
-        if (externalSorter == null) {
-          externalSorter = sorter
-        } else {
-          externalSorter.merge(sorter)
-          sorter.cleanupResources()
-        }
-        hashMap = createHashMap()
-      }
-      processRow(buffer, newInput)
-      i += 1
-    }
-    if (externalSorter != null) {
-      val sorter = hashMap.destructAndCreateExternalSorter()
-      externalSorter.merge(sorter)
-      sorter.cleanupResources()
-
-      switchToSortBasedAggregation()
     }
   }
 
@@ -705,15 +679,7 @@ class TungstenAggregationIterator(
   /**
    * Start processing input rows.
    */
-  testFallbackStartsAt match {
-    case None =>
-      processInputs()
-    case Some(fallbackStartsAt) =>
-      // This is the testing path. processInputsWithControlledFallback is same as processInputs
-      // except that it switches to sort-based aggregation after `fallbackStartsAt` input rows
-      // have been processed.
-      processInputsWithControlledFallback(fallbackStartsAt)
-  }
+  processInputs(testFallbackStartsAt.getOrElse(Int.MaxValue))
 
   // If we did not switch to sort-based aggregation in processInputs,
   // we pre-load the first key-value pair from the map (to make hasNext idempotent).

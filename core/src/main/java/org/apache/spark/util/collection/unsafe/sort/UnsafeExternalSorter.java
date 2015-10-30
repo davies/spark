@@ -234,6 +234,10 @@ public final class UnsafeExternalSorter extends MemoryConsumer {
     return allocatedPages.size();
   }
 
+  public void freeImMemorySorter() {
+    inMemSorter = null;
+  }
+
   /**
    * Free this sorter's data pages.
    *
@@ -401,21 +405,24 @@ public final class UnsafeExternalSorter extends MemoryConsumer {
    * after consuming this iterator.
    */
   public UnsafeSorterIterator getSortedIterator() throws IOException {
-    assert(inMemSorter != null);
-    readingIterator = new SpillableIterator(inMemSorter.getSortedIterator());
-    int numIteratorsToMerge = spillWriters.size() + (readingIterator.hasNext() ? 1 : 0);
-    if (spillWriters.isEmpty()) {
-      return readingIterator;
-    } else {
+    if (spillWriters.size() > 0) {
       final UnsafeSorterSpillMerger spillMerger =
-        new UnsafeSorterSpillMerger(recordComparator, prefixComparator, numIteratorsToMerge);
+        new UnsafeSorterSpillMerger(recordComparator, prefixComparator, spillWriters.size());
       for (UnsafeSorterSpillWriter spillWriter : spillWriters) {
         spillMerger.addSpillIfNotEmpty(spillWriter.getReader(blockManager));
       }
       spillWriters.clear();
-      spillMerger.addSpillIfNotEmpty(readingIterator);
 
+      if (inMemSorter != null) {
+        readingIterator = new SpillableIterator(inMemSorter.getSortedIterator());
+        spillMerger.addSpillIfNotEmpty(readingIterator);
+      }
       return spillMerger.getSortedIterator();
+
+    } else {
+      assert(inMemSorter != null);
+      readingIterator = new SpillableIterator(inMemSorter.getSortedIterator());
+      return readingIterator;
     }
   }
 

@@ -32,7 +32,6 @@ import org.apache.spark.storage.BlockManager;
 import org.apache.spark.unsafe.KVIterator;
 import org.apache.spark.unsafe.Platform;
 import org.apache.spark.unsafe.map.BytesToBytesMap;
-import org.apache.spark.unsafe.memory.MemoryBlock;
 import org.apache.spark.util.collection.unsafe.sort.*;
 
 /**
@@ -83,36 +82,11 @@ public final class UnsafeKVExternalSorter {
         /* initialSize */ 4096,
         pageSizeBytes);
     } else {
-      // The memory needed for UnsafeInMemorySorter should be less than longArray in map.
-      map.freeArray();
-      // The memory used by UnsafeInMemorySorter will be counted later (end of this block)
-      final UnsafeInMemorySorter inMemSorter = new UnsafeInMemorySorter(
-        taskMemoryManager, recordComparator, prefixComparator, Math.max(1, map.numElements()));
-
-      // We cannot use the destructive iterator here because we are reusing the existing memory
-      // pages in BytesToBytesMap to hold records during sorting.
-      // The only new memory we are allocating is the pointer/prefix array.
-      BytesToBytesMap.MapIterator iter = map.iterator();
-      final int numKeyFields = keySchema.size();
-      UnsafeRow row = new UnsafeRow();
-      while (iter.hasNext()) {
-        final BytesToBytesMap.Location loc = iter.next();
-        final Object baseObject = loc.getKeyAddress().getBaseObject();
-        final long baseOffset = loc.getKeyAddress().getBaseOffset();
-
-        // Get encoded memory address
-        // baseObject + baseOffset point to the beginning of the key data in the map, but that
-        // the KV-pair's length data is stored in the word immediately before that address
-        MemoryBlock page = loc.getMemoryPage();
-        long address = taskMemoryManager.encodePageNumberAndOffset(page, baseOffset - 8);
-
-        // Compute prefix
-        row.pointTo(baseObject, baseOffset, numKeyFields, loc.getKeyLength());
-        final long prefix = prefixComputer.computePrefix(row);
-
-        inMemSorter.insertRecord(address, prefix);
-      }
-
+      long[] array = map.getCompactArray();
+      UnsafeInMemorySorter inMemSorter =
+        new UnsafeInMemorySorter(taskMemoryManager, recordComparator, PrefixComparators.LONG,
+          map.numElements(), array);
+      System.err.println("dump " + map.numElements());
       sorter = UnsafeExternalSorter.createWithExistingInMemorySorter(
         taskMemoryManager,
         blockManager,
@@ -124,9 +98,9 @@ public final class UnsafeKVExternalSorter {
         inMemSorter);
 
       sorter.spill();
+      // this sorter will not be used to insert new records
+      sorter.freeImMemorySorter();
       map.free();
-      // counting the memory used UnsafeInMemorySorter
-      taskMemoryManager.acquireExecutionMemory(inMemSorter.getMemoryUsage(), sorter);
     }
   }
 

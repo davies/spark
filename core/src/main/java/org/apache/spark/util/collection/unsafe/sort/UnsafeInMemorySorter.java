@@ -89,6 +89,18 @@ public final class UnsafeInMemorySorter {
     this.sortComparator = new SortComparator(recordComparator, prefixComparator, memoryManager);
   }
 
+  public UnsafeInMemorySorter(
+    final TaskMemoryManager memoryManager,
+    final RecordComparator recordComparator,
+    final PrefixComparator prefixComparator,
+    int records, long[] array) {
+    this.memoryManager = memoryManager;
+    this.sorter = new Sorter<>(UnsafeSortDataFormat.INSTANCE);
+    this.sortComparator = new SortComparator(recordComparator, prefixComparator, memoryManager);
+    this.array = array;
+    this.pos = records * 2;
+  }
+
   public void reset() {
     pos = 0;
   }
