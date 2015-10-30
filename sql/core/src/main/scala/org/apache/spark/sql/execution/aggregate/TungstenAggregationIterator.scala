@@ -473,7 +473,7 @@ class TungstenAggregationIterator(
   // Part 3: Methods and fields used by hash-based aggregation.
   ///////////////////////////////////////////////////////////////////////////
 
-  private def createHashMap():UnsafeFixedWidthAggregationMap = {
+  private def createHashMap(): UnsafeFixedWidthAggregationMap = {
     new UnsafeFixedWidthAggregationMap(
       initialAggregationBuffer,
       StructType.fromAttributes(allAggregateFunctions.flatMap(_.aggBufferAttributes)),
@@ -492,10 +492,9 @@ class TungstenAggregationIterator(
 
   // The function used to read and process input rows. When processing input rows,
   // it first uses hash-based aggregation by putting groups and their buffers in
-  // hashMap. If we could not allocate more memory for the map, we switch to
-  // sort-based aggregation (by calling switchToSortBasedAggregation).
+  // hashMap. If we could not allocate more memory for the map, will spill the map using
+  // external sorter, finally do sort-based aggregation on these merged external sorters.
   private def processInputs(fallbackStartsAt: Int): Unit = {
-    var i = 0
     if (groupingExpressions.isEmpty) {
       // If there is no grouping expressions, we can just reuse the same buffer over and over again.
       // Note that it would be better to eliminate the hash map entirely in the future.
@@ -508,13 +507,13 @@ class TungstenAggregationIterator(
       }
     } else {
 
+      var i = 0
       while (inputIter.hasNext) {
         val newInput = inputIter.next()
         numInputRows += 1
         val groupingKey = groupProjection.apply(newInput)
         var buffer: UnsafeRow = hashMap.getAggregationBufferFromUnsafeRow(groupingKey)
         if (buffer == null || i == fallbackStartsAt) {
-          i = 0
           val sorter = hashMap.destructAndCreateExternalSorter()
           if (externalSorter == null) {
             externalSorter = sorter
@@ -522,6 +521,8 @@ class TungstenAggregationIterator(
             externalSorter.merge(sorter)
             sorter.cleanupResources()
           }
+
+          i = 0
           hashMap = createHashMap()
           buffer = hashMap.getAggregationBufferFromUnsafeRow(groupingKey)
           assert(buffer != null)

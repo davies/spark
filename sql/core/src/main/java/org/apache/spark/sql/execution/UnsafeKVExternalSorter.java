@@ -86,7 +86,7 @@ public final class UnsafeKVExternalSorter {
       UnsafeInMemorySorter inMemSorter =
         new UnsafeInMemorySorter(taskMemoryManager, recordComparator, PrefixComparators.LONG,
           map.numElements(), array);
-      System.err.println("dump " + map.numElements());
+
       sorter = UnsafeExternalSorter.createWithExistingInMemorySorter(
         taskMemoryManager,
         blockManager,
