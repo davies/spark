@@ -870,9 +870,10 @@ public final class BytesToBytesMap extends MemoryConsumer {
 
   /**
    * Return the compacted long array.
+   *
+   * Note: once called this method, this map can't be used anymore.
    */
   public long[] getCompactArray() {
-    // compact the longArray
     int r = longArray.length - 2;  // last non-empty pos
     int l = 0;  // first empty pos
     while (l < r) {

@@ -394,7 +394,7 @@ public final class UnsafeExternalSorter extends MemoryConsumer {
   }
 
   /**
-   * Merger two UnsafeExternalSorters together, the second will be emptied.
+   * Merge another UnsafeExternalSorters into this one, the other one will be emptied.
    *
    * @throws IOException
    */
@@ -402,6 +402,7 @@ public final class UnsafeExternalSorter extends MemoryConsumer {
     other.spill();
     spillWriters.addAll(other.spillWriters);
     other.spillWriters.clear();
+    other.cleanupResources();
   }
 
   /**

@@ -170,10 +170,7 @@ class UnsafeFixedWidthAggregationMapSuite
   }
 
   testWithMemoryLeakDetection("test external sorting") {
-    // Memory consumption in the beginning of the task.
-    val initialMemoryConsumption = taskMemoryManager.getMemoryConsumptionForThisTask()
-
-    val map = new UnsafeFixedWidthAggregationMap(
+    def createMap() = new UnsafeFixedWidthAggregationMap(
       emptyAggregationBuffer,
       aggBufferSchema,
       groupKeySchema,
@@ -183,96 +180,47 @@ class UnsafeFixedWidthAggregationMapSuite
       false // disable perf metrics
     )
 
-    val keys = randomStrings(1024).take(512)
+    var map = createMap()
+    val keys = randomStrings(1024)
     keys.foreach { keyString =>
       val buf = map.getAggregationBuffer(InternalRow(UTF8String.fromString(keyString)))
       buf.setInt(0, keyString.length)
-      assert(buf != null)
     }
 
     // Convert the map into a sorter
     val sorter = map.destructAndCreateExternalSorter()
 
-    // Add more keys to the sorter and make sure the results come out sorted.
-    val additionalKeys = randomStrings(1024)
-    val keyConverter = UnsafeProjection.create(groupKeySchema)
-    val valueConverter = UnsafeProjection.create(aggBufferSchema)
-
-    additionalKeys.zipWithIndex.foreach { case (str, i) =>
-      val k = InternalRow(UTF8String.fromString(str))
-      val v = InternalRow(str.length)
-      sorter.insertKV(keyConverter.apply(k), valueConverter.apply(v))
+    map = createMap()
+    keys.zipWithIndex.foreach { case (str, i) =>
+      val buf = map.getAggregationBuffer(InternalRow(UTF8String.fromString(str)))
+      buf.setInt(0, str.length)
 
       if ((i % 100) == 0) {
-        memoryManager.markExecutionAsOutOfMemoryOnce()
-        sorter.closeCurrentPage()
+        val sorter2 = map.destructAndCreateExternalSorter()
+        sorter.merge(sorter2)
+        map = createMap()
       }
     }
+    val sorter2 = map.destructAndCreateExternalSorter()
+    sorter.merge(sorter2)
 
-    val out = new scala.collection.mutable.ArrayBuffer[String]
     val iter = sorter.sortedIterator()
-    while (iter.next()) {
-      assert(iter.getKey.getString(0).length === iter.getValue.getInt(0))
-      out += iter.getKey.getString(0)
+    // make sure the same key are grouped together
+    var i = 0
+    while (i < keys.size) {
+      assert(iter.next())
+      val key = iter.getKey.getUTF8String(0).clone()
+      assert(key.numBytes() === iter.getValue.getInt(0))
+      assert(iter.next())
+      assert(key === iter.getKey.getUTF8String(0))
+      assert(key.numBytes() === iter.getValue.getInt(0))
+      i += 1
     }
-
-    assert(out === (keys ++ additionalKeys).sorted)
-
-    map.free()
-  }
-
-  testWithMemoryLeakDetection("test external sorting with an empty map") {
-
-    val map = new UnsafeFixedWidthAggregationMap(
-      emptyAggregationBuffer,
-      aggBufferSchema,
-      groupKeySchema,
-      taskMemoryManager,
-      128, // initial capacity
-      PAGE_SIZE_BYTES,
-      false // disable perf metrics
-    )
-
-    // Convert the map into a sorter
-    val sorter = map.destructAndCreateExternalSorter()
-
-    // Add more keys to the sorter and make sure the results come out sorted.
-    val additionalKeys = randomStrings(1024)
-    val keyConverter = UnsafeProjection.create(groupKeySchema)
-    val valueConverter = UnsafeProjection.create(aggBufferSchema)
-
-    additionalKeys.zipWithIndex.foreach { case (str, i) =>
-      val k = InternalRow(UTF8String.fromString(str))
-      val v = InternalRow(str.length)
-      sorter.insertKV(keyConverter.apply(k), valueConverter.apply(v))
-
-      if ((i % 100) == 0) {
-        memoryManager.markExecutionAsOutOfMemoryOnce()
-        sorter.closeCurrentPage()
-      }
-    }
-
-    val out = new scala.collection.mutable.ArrayBuffer[String]
-    val iter = sorter.sortedIterator()
-    while (iter.next()) {
-      // At here, we also test if copy is correct.
-      val key = iter.getKey.copy()
-      val value = iter.getValue.copy()
-      assert(key.getString(0).length === value.getInt(0))
-      out += key.getString(0)
-    }
-
-    assert(out === (additionalKeys).sorted)
-
-    map.free()
   }
 
   testWithMemoryLeakDetection("test external sorting with empty records") {
 
-    // Memory consumption in the beginning of the task.
-    val initialMemoryConsumption = taskMemoryManager.getMemoryConsumptionForThisTask()
-
-    val map = new UnsafeFixedWidthAggregationMap(
+    def createMap() = new UnsafeFixedWidthAggregationMap(
       emptyAggregationBuffer,
       StructType(Nil),
       StructType(Nil),
@@ -281,24 +229,29 @@ class UnsafeFixedWidthAggregationMapSuite
       PAGE_SIZE_BYTES,
       false // disable perf metrics
     )
+    var map = createMap()
 
     (1 to 10).foreach { i =>
       val buf = map.getAggregationBuffer(UnsafeRow.createFromByteArray(0, 0))
       assert(buf != null)
     }
-
     // Convert the map into a sorter. Right now, it contains one record.
     val sorter = map.destructAndCreateExternalSorter()
 
-    // Add more keys to the sorter and make sure the results come out sorted.
+    // each new map contains one record
+    map = createMap()
     (1 to 4096).foreach { i =>
-      sorter.insertKV(UnsafeRow.createFromByteArray(0, 0), UnsafeRow.createFromByteArray(0, 0))
+      val buf = map.getAggregationBuffer(UnsafeRow.createFromByteArray(0, 0))
+      assert(buf != null)
 
       if ((i % 100) == 0) {
-        memoryManager.markExecutionAsOutOfMemoryOnce()
-        sorter.closeCurrentPage()
+        val sorter2 = map.destructAndCreateExternalSorter()
+        sorter.merge(sorter2)
+        map = createMap()
       }
     }
+    val sorter2 = map.destructAndCreateExternalSorter()
+    sorter.merge(sorter2)
 
     var count = 0
     val iter = sorter.sortedIterator()
@@ -309,8 +262,7 @@ class UnsafeFixedWidthAggregationMapSuite
       count += 1
     }
 
-    // 1 record was from the map and 4096 records were explicitly inserted.
-    assert(count === 4097)
+    assert(count === 42)
 
     map.free()
   }

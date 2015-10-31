@@ -63,16 +63,15 @@ public final class UnsafeKVExternalSorter {
       @Nullable BytesToBytesMap map) throws IOException {
     this.keySchema = keySchema;
     this.valueSchema = valueSchema;
-    final TaskContext taskContext = TaskContext.get();
+    this.prefixComputer = SortPrefixUtils.createPrefixGenerator(keySchema);
 
-    prefixComputer = SortPrefixUtils.createPrefixGenerator(keySchema);
-    PrefixComparator prefixComparator = SortPrefixUtils.getPrefixComparator(keySchema);
     BaseOrdering ordering = GenerateOrdering.create(keySchema);
     KVComparator recordComparator = new KVComparator(ordering, keySchema.length());
-
+    TaskContext taskContext = TaskContext.get();
     TaskMemoryManager taskMemoryManager = taskContext.taskMemoryManager();
 
     if (map == null) {
+      PrefixComparator prefixComparator = SortPrefixUtils.getPrefixComparator(keySchema);
       sorter = UnsafeExternalSorter.create(
         taskMemoryManager,
         blockManager,
@@ -92,7 +91,7 @@ public final class UnsafeKVExternalSorter {
         blockManager,
         taskContext,
         new KVComparator(ordering, keySchema.length()),
-        prefixComparator,
+        PrefixComparators.LONG,
         /* initialSize */ 4096,
         pageSizeBytes,
         inMemSorter);

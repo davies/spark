@@ -519,7 +519,6 @@ class TungstenAggregationIterator(
             externalSorter = sorter
           } else {
             externalSorter.merge(sorter)
-            sorter.cleanupResources()
           }
 
           i = 0
@@ -534,7 +533,6 @@ class TungstenAggregationIterator(
       if (externalSorter != null) {
         val sorter = hashMap.destructAndCreateExternalSorter()
         externalSorter.merge(sorter)
-        sorter.cleanupResources()
 
         switchToSortBasedAggregation()
       }
