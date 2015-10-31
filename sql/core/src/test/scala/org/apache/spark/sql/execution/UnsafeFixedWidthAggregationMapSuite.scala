@@ -170,7 +170,7 @@ class UnsafeFixedWidthAggregationMapSuite
   }
 
   testWithMemoryLeakDetection("test external sorting") {
-    def createMap() = new UnsafeFixedWidthAggregationMap(
+    def createMap(): UnsafeFixedWidthAggregationMap = new UnsafeFixedWidthAggregationMap(
       emptyAggregationBuffer,
       aggBufferSchema,
       groupKeySchema,
@@ -220,7 +220,7 @@ class UnsafeFixedWidthAggregationMapSuite
 
   testWithMemoryLeakDetection("test external sorting with empty records") {
 
-    def createMap() = new UnsafeFixedWidthAggregationMap(
+    def createMap(): UnsafeFixedWidthAggregationMap = new UnsafeFixedWidthAggregationMap(
       emptyAggregationBuffer,
       StructType(Nil),
       StructType(Nil),
