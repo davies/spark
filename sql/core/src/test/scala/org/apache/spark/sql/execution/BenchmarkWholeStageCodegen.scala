@@ -150,32 +150,8 @@ class BenchmarkWholeStageCodegen extends SparkFunSuite {
       Intel(R) Core(TM) i7-4558U CPU @ 2.80GHz
       BroadcastHashJoin:                 Avg Time(ms)    Avg Rate(M/s)  Relative Rate
       -------------------------------------------------------------------------------
-      BroadcastHashJoin w/o codegen           3053.41             3.43         1.00 X
-      BroadcastHashJoin w codegen             1028.40            10.20         2.97 X
-    */
-    benchmark.run()
-  }
-
-  def testBroadcastHashJoin(values: Int): Unit = {
-    val benchmark = new Benchmark("BroadcastHashJoin", values)
-
-    val dim = broadcast(sqlContext.range(1 << 16).selectExpr("id as k", "cast(id as string) as v"))
-
-    benchmark.addCase("BroadcastHashJoin w/o codegen") { iter =>
-      sqlContext.setConf("spark.sql.codegen.wholeStage", "false")
-      sqlContext.range(values).join(dim, (col("id") % 60000) === col("k")).count()
-    }
-    benchmark.addCase(s"BroadcastHashJoin w codegen") { iter =>
-      sqlContext.setConf("spark.sql.codegen.wholeStage", "true")
-      sqlContext.range(values).join(dim, (col("id") % 60000) === col("k")).count()
-    }
-
-    /*
-    Intel(R) Core(TM) i7-4558U CPU @ 2.80GHz
-    Aggregate with keys:               Avg Time(ms)    Avg Rate(M/s)  Relative Rate
-    -------------------------------------------------------------------------------
-    Aggregate w/o codegen                  13071.57             4.01         1.00 X
-    Aggregate w codegen                     5072.56            10.34         2.58 X
+      BroadcastHashJoin w/o codegen           5317.47             9.86         1.00 X
+      BroadcastHashJoin w codegen              965.90            54.28         5.51 X
     */
     benchmark.run()
   }
@@ -252,6 +228,6 @@ class BenchmarkWholeStageCodegen extends SparkFunSuite {
     // testStatFunctions(20 << 20)
     // testAggregateWithKey(20 << 20)
     // testBytesToBytesMap(50 << 20)
-    // testBroadcastHashJoin(10 << 20)
+    // testBroadcastHashJoin(50 << 20)
   }
 }

@@ -489,6 +489,9 @@ private[joins] final class UniqueLongHashedRelation(
   }
 }
 
+/**
+  * A relation that's based on array of UnsafeRow.
+  */
 private[joins] final class LongArrayRelation(
   private var numFields: Int,
   private var start: Long,

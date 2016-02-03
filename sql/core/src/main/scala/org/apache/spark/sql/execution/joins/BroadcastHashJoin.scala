@@ -135,16 +135,20 @@ case class BroadcastHashJoin(
   }
 
   override def doProduce(ctx: CodegenContext): String = {
-    // create a name for HashRelation
+    // create a name for HashedRelation
     broadcastRelation = Await.result(broadcastFuture, timeout)
     val broadcast = ctx.addReferenceObj("broadcast", broadcastRelation)
     relationTerm = ctx.freshName("relation")
-    // TODO: create specialized HashRelation for single join key
-    val clsName = classOf[UnsafeHashedRelation].getName
+    val clsName = broadcastRelation.value.getClass.getName
+    val incPeakMemory = if (broadcastRelation.value.isInstanceOf[UnsafeHashedRelation]) {
+      s"incPeakExecutionMemory($relationTerm.getUnsafeSize());"
+    } else {
+      ""
+    }
     ctx.addMutableState(clsName, relationTerm,
       s"""
          | $relationTerm = ($clsName) $broadcast.value();
-         | incPeakExecutionMemory($relationTerm.getUnsafeSize());
+         | $incPeakMemory
        """.stripMargin)
 
     s"""
@@ -153,9 +157,8 @@ case class BroadcastHashJoin(
   }
 
   override def doConsume(ctx: CodegenContext, input: Seq[ExprCode]): String = {
-    // generate the key as UnsafeRow
+    // generate the key as UnsafeRow or Long
     ctx.currentVars = input
-    // TODO: filter out null from stream
     val (keyVal, anyNull) = if (canJoinKeyFitWithinLong) {
       val expr = rewriteKeyExpr(streamedKeys).head
       val ev = BindReferences.bindReference(expr, streamedPlan.output).gen(ctx)
@@ -198,9 +201,8 @@ case class BroadcastHashJoin(
       s"""
          | // generate join key
          | ${keyVal.code}
-         | // find matches from HashRelation
-         | UnsafeRow $matched = $anyNull ? null :
-         |  (UnsafeRow) $relationTerm.getValue(${keyVal.value});
+         | // find matches from HashedRelation
+         | UnsafeRow $matched = $anyNull ? null: (UnsafeRow)$relationTerm.getValue(${keyVal.value});
          | if ($matched != null) {
          |   ${buildColumns.map(_.code).mkString("\n")}
          |   $outputCode
