@@ -669,7 +669,7 @@ https://cwiki.apache.org/confluence/display/Hive/Enhanced+Aggregation%2C+Cube%2C
         case other => UnresolvedExtractValue(other, Literal(cleanIdentifier(attr)))
       }
     case Token("TOK_SUBQUERY_EXPR", Token("TOK_SUBQUERY_OP", Nil) :: subquery :: Nil) =>
-      ScalarSubQuery(nodeToPlan(subquery))
+      ScalarSubquery(nodeToPlan(subquery))
 
     /* Stars (*) */
     case Token("TOK_ALLCOLREF", Nil) => UnresolvedStar(None)
@@ -754,7 +754,7 @@ https://cwiki.apache.org/confluence/display/Hive/Enhanced+Aggregation%2C+Cube%2C
       In(nodeToExpr(value), list.map(nodeToExpr))
     case Token("TOK_SUBQUERY_EXPR",
     Token("TOK_SUBQUERY_OP", Token(IN(), Nil) :: Nil) :: subquery :: value :: Nil) =>
-      In(nodeToExpr(value), ListSubQuery(nodeToPlan(subquery)) :: Nil)
+      In(nodeToExpr(value), ListSubquery(nodeToPlan(subquery)) :: Nil)
     case Token("TOK_FUNCTION",
     Token(BETWEEN(), Nil) ::
       kw ::

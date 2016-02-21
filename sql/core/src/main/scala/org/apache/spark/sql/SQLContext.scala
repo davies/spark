@@ -193,7 +193,7 @@ class SQLContext private[sql](
   protected[sql] lazy val analyzer: Analyzer =
     new Analyzer(catalog, functionRegistry, conf) {
       override val extendedResolutionRules =
-        ExtractPythonUDFs ::
+        python.ExtractPythonUDFs ::
         PreInsertCastAndRename ::
         (if (conf.runSQLOnFile) new ResolveDataSource(self) :: Nil else Nil)
 
@@ -884,6 +884,7 @@ class SQLContext private[sql](
   @transient
   protected[sql] val prepareForExecution = new RuleExecutor[SparkPlan] {
     val batches = Seq(
+      Batch("Subquery", Once, PlanSubqueries(self)),
       Batch("Add exchange", Once, EnsureRequirements(self)),
       Batch("Whole stage codegen", Once, CollapseCodegenStages(self))
     )
@@ -915,7 +916,7 @@ class SQLContext private[sql](
       rdd: RDD[Array[Any]],
       schema: StructType): DataFrame = {
 
-    val rowRdd = rdd.map(r => EvaluatePython.fromJava(r, schema).asInstanceOf[InternalRow])
+    val rowRdd = rdd.map(r => python.EvaluatePython.fromJava(r, schema).asInstanceOf[InternalRow])
     DataFrame(this, LogicalRDD(schema.toAttributes, rowRdd)(self))
   }
 

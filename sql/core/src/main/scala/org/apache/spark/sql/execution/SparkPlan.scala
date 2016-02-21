@@ -25,7 +25,7 @@ import scala.concurrent.duration.Duration
 
 import org.apache.spark.Logging
 import org.apache.spark.rdd.{RDD, RDDOperationScope}
-import org.apache.spark.sql.{DataFrame, Row, SQLContext}
+import org.apache.spark.sql.{Row, SQLContext}
 import org.apache.spark.sql.catalyst.{CatalystTypeConverters, InternalRow}
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.expressions.codegen._
@@ -115,8 +115,49 @@ abstract class SparkPlan extends QueryPlan[SparkPlan] with Logging with Serializ
   final def execute(): RDD[InternalRow] = {
     RDDOperationScope.withScope(sparkContext, nodeName, false, true) {
       prepare()
+      waitForSubqueries()
       doExecute()
     }
+  }
+
+  // All the subqueries and their Future of results.
+  @transient private val queryResults = ArrayBuffer[(ScalarSubquery, Future[Array[InternalRow]])]()
+
+  /**
+   * Collects all the subqueries and create a Future to take the first two rows of them.
+   */
+  protected def prepareSubqueries(): Unit = {
+    val allSubqueries = expressions.flatMap(_.collect {case e: ScalarSubquery => e})
+    allSubqueries.asInstanceOf[Seq[ScalarSubquery]].foreach { e =>
+      val futureResult = Future {
+        // We only need the first row, try to take two rows so we can throw an exception if there
+        // are more than one rows returned.
+        e.executedPlan.executeTake(2)
+      }(SparkPlan.subqueryExecutionContext)
+      queryResults += e -> futureResult
+    }
+  }
+
+  /**
+   * Waits for all the subqueries to finish and updates the results.
+   */
+  protected def waitForSubqueries(): Unit = {
+    // fill in the result of subqueries
+    queryResults.foreach {
+      case (e, futureResult) =>
+        val rows = Await.result(futureResult, Duration.Inf)
+        if (rows.length > 1) {
+          sys.error(s"more than one row returned by a subquery used as an expression:\n${e.plan}")
+        }
+        if (rows.length == 1) {
+          assert(rows(0).numFields == 1, "Analyzer should make sure this only returns one column")
+          e.updateResult(rows(0).get(0, e.dataType))
+        } else {
+          // There is no rows returned, the result should be null.
+          e.updateResult(null)
+        }
+    }
+    queryResults.clear()
   }
 
   /**
@@ -125,33 +166,8 @@ abstract class SparkPlan extends QueryPlan[SparkPlan] with Logging with Serializ
   final def prepare(): Unit = {
     if (prepareCalled.compareAndSet(false, true)) {
       doPrepare()
-
-      // collect all the subqueries and submit jobs to execute them in background
-      val queryResults = ArrayBuffer[(ScalarSubQuery, Future[Array[InternalRow]])]()
-      val allSubqueries = expressions.flatMap(_.collect {case e: ScalarSubQuery => e})
-      allSubqueries.foreach { e =>
-        val futureResult = scala.concurrent.future {
-          val df = DataFrame(sqlContext, e.query)
-          df.queryExecution.toRdd.collect()
-        }(SparkPlan.subqueryExecutionContext)
-        queryResults += e -> futureResult
-      }
-
+      prepareSubqueries()
       children.foreach(_.prepare())
-
-      // fill in the result of subqueries
-      queryResults.foreach {
-        case (e, futureResult) =>
-          val rows = Await.result(futureResult, Duration.Inf)
-          if (rows.length > 1) {
-            sys.error(s"Scalar subquery should return at most one row, but got ${rows.length}: " +
-              s"${e.query.treeString}")
-          }
-          // Analyzer will make sure that it only return on column
-          if (rows.length > 0) {
-            e.updateResult(rows(0).get(0, e.dataType))
-          }
-      }
     }
   }
 

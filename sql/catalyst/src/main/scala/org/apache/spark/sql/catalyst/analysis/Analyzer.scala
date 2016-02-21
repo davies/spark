@@ -122,8 +122,9 @@ class Analyzer(
           }
           substituted.getOrElse(u)
         case other =>
+          // This can't be done in ResolveSubquery because that does not know the CTE.
           other transformExpressions {
-            case e: SubQueryExpression =>
+            case e: SubqueryExpression =>
               e.withNewPlan(substituteCTE(e.query, cteRelations))
           }
       }
@@ -216,13 +217,23 @@ class Analyzer(
       Seq.tabulate(1 << c.groupByExprs.length)(i => i)
     }
 
+    private def hasGroupingId(expr: Seq[Expression]): Boolean = {
+      expr.exists(_.collectFirst {
+        case u: UnresolvedAttribute if resolver(u.name, VirtualColumn.groupingIdName) => u
+      }.isDefined)
+    }
+
     def apply(plan: LogicalPlan): LogicalPlan = plan resolveOperators {
       case a if !a.childrenResolved => a // be sure all of the children are resolved.
       case Aggregate(Seq(c @ Cube(groupByExprs)), aggregateExpressions, child) =>
         GroupingSets(bitmasks(c), groupByExprs, child, aggregateExpressions)
       case Aggregate(Seq(r @ Rollup(groupByExprs)), aggregateExpressions, child) =>
         GroupingSets(bitmasks(r), groupByExprs, child, aggregateExpressions)
-      case x: GroupingSets =>
+      case g: GroupingSets if g.expressions.exists(!_.resolved) && hasGroupingId(g.expressions) =>
+        failAnalysis(
+          s"${VirtualColumn.groupingIdName} is deprecated; use grouping_id() instead")
+      // Ensure all the expressions have been resolved.
+      case x: GroupingSets if x.expressions.forall(_.resolved) =>
         val gid = AttributeReference(VirtualColumn.groupingIdName, IntegerType, false)()
 
         // Expand works by setting grouping expressions to null as determined by the bitmasks. To
@@ -429,7 +440,8 @@ class Analyzer(
             case r if r == oldRelation => newRelation
           } transformUp {
             case other => other transformExpressions {
-              case a: Attribute => attributeRewrites.get(a).getOrElse(a)
+              case a: Attribute =>
+                attributeRewrites.get(a).getOrElse(a).withQualifiers(a.qualifiers)
             }
           }
           newRight
@@ -605,17 +617,24 @@ class Analyzer(
       case sa @ Sort(_, _, child: Aggregate) => sa
 
       case s @ Sort(order, _, child) if !s.resolved && child.resolved =>
-        val newOrder = order.map(resolveExpressionRecursively(_, child).asInstanceOf[SortOrder])
-        val requiredAttrs = AttributeSet(newOrder).filter(_.resolved)
-        val missingAttrs = requiredAttrs -- child.outputSet
-        if (missingAttrs.nonEmpty) {
-          // Add missing attributes and then project them away after the sort.
-          Project(child.output,
-            Sort(newOrder, s.global, addMissingAttr(child, missingAttrs)))
-        } else if (newOrder != order) {
-          s.copy(order = newOrder)
-        } else {
-          s
+        try {
+          val newOrder = order.map(resolveExpressionRecursively(_, child).asInstanceOf[SortOrder])
+          val requiredAttrs = AttributeSet(newOrder).filter(_.resolved)
+          val missingAttrs = requiredAttrs -- child.outputSet
+          if (missingAttrs.nonEmpty) {
+            // Add missing attributes and then project them away after the sort.
+            Project(child.output,
+              Sort(newOrder, s.global, addMissingAttr(child, missingAttrs)))
+          } else if (newOrder != order) {
+            s.copy(order = newOrder)
+          } else {
+            s
+          }
+        } catch {
+          // Attempting to resolve it might fail. When this happens, return the original plan.
+          // Users will see an AnalysisException for resolution failure of missing attributes
+          // in Sort
+          case ae: AnalysisException => s
         }
     }
 
@@ -645,6 +664,11 @@ class Analyzer(
           }
           val newAggregateExpressions = a.aggregateExpressions ++ missingAttrs
           a.copy(aggregateExpressions = newAggregateExpressions)
+        case g: Generate =>
+          // If join is false, we will convert it to true for getting from the child the missing
+          // attributes that its child might have or could have.
+          val missing = missingAttrs -- g.child.outputSet
+          g.copy(join = true, child = addMissingAttr(g.child, missing))
         case u: UnaryNode =>
           u.withNewChildren(addMissingAttr(u.child, missingAttrs) :: Nil)
         case other =>
@@ -718,16 +742,19 @@ class Analyzer(
     *     selected column is not nullable, otherwise it's not supported (raise Exception).
     *   d. Unresolved scalar subquery will be rewritten as left outer join, the unresolved conditoin
     *     in Filter will be pulled out as join condition.
-    */
+   * This rule resolve subqueries inside expressions.
+   *
+   * Note: CTE are handled in CTESubstitution.
+   */
   object ResolveSubquery extends Rule[LogicalPlan] with PredicateHelper {
 
     private def hasSubquery(e: Expression): Boolean = {
-      e.find(_.isInstanceOf[SubQueryExpression]).isDefined
+      e.find(_.isInstanceOf[SubqueryExpression]).isDefined
     }
 
     private def onlyHasScalarSubquery(e: Expression): Boolean = {
-      (e.find(x => x.isInstanceOf[Exists] || x.isInstanceOf[ListSubQuery]).isEmpty
-        && e.find(_.isInstanceOf[ScalarSubQuery]).isDefined)
+      (e.find(x => x.isInstanceOf[Exists] || x.isInstanceOf[ListSubquery]).isEmpty
+        && e.find(_.isInstanceOf[ScalarSubquery]).isDefined)
     }
 
     private def hasSubquery(q: LogicalPlan): Boolean = {
@@ -818,7 +845,7 @@ class Analyzer(
       case q: LogicalPlan if q.childrenResolved && hasSubquery(q) =>
 
         val afterResolve = q transformExpressions {
-          case e: SubQueryExpression if !e.query.resolved =>
+          case e: SubqueryExpression if !e.query.resolved =>
             e.withNewPlan(execute(e.query))
         }
 
@@ -839,11 +866,11 @@ class Analyzer(
                 val (resolved, joinCondition) = removeUnresolvedPredicates(sub)
                 newChild = Join(newChild, resolved, LeftAnti, joinCondition)
 
-              case In(value, ListSubQuery(sub) :: Nil) if value.resolved =>
+              case In(value, ListSubquery(sub) :: Nil) if value.resolved =>
                 val (resolved, cond) = rewriteInSubquery(value, sub)
                 newChild = Join(newChild, resolved, LeftSemi, Some(cond))
 
-              case Not(In(value, ListSubQuery(sub) :: Nil)) if value.resolved =>
+              case Not(In(value, ListSubquery(sub) :: Nil)) if value.resolved =>
                 val (resolved, cond) = rewriteInSubquery(value, sub)
                 if (resolved.output.exists(_.nullable)) {
                   throw new AnalysisException(s"NOT IN with nullable subquery is not supported")
@@ -858,7 +885,7 @@ class Analyzer(
               case expr: Expression if onlyHasScalarSubquery(expr) =>
                 // rewrites the correlated scalar subqueries as join
                 val newCond = expr.transformUp {
-                  case ScalarSubQuery(sub) if !sub.resolved =>
+                  case ScalarSubquery(sub) if !sub.resolved =>
 
                     val (resolved, joinCondition) = removeUnresolvedPredicates(sub)
                     val predicates = splitConjunctivePredicates(joinCondition.get)
@@ -913,7 +940,7 @@ class Analyzer(
             if (other.expressions.exists(_.find(_.isInstanceOf[Exists]).isDefined)) {
               throw new AnalysisException(s"EXISTS subquery can't be used inside $other")
             }
-            if (other.expressions.exists(_.find(_.isInstanceOf[ListSubQuery]).isDefined)) {
+            if (other.expressions.exists(_.find(_.isInstanceOf[ListSubquery]).isDefined)) {
               throw new AnalysisException(s"IN subquery can't be used inside $other")
             }
             other
