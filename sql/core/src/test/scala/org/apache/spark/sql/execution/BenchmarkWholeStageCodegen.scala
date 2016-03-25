@@ -139,9 +139,9 @@ class BenchmarkWholeStageCodegen extends SparkFunSuite {
     */
   }
 
-  ignore("broadcast hash join") {
+  test("broadcast hash join") {
     val N = 100 << 20
-    val M = 1 << 16
+    val M = (1 << 16) - 1
     val dim = broadcast(sqlContext.range(M).selectExpr("id as k", "cast(id as string) as v"))
 
     runBenchmark("Join w long", N) {
@@ -149,11 +149,26 @@ class BenchmarkWholeStageCodegen extends SparkFunSuite {
     }
 
     /*
+    Java HotSpot(TM) 64-Bit Server VM 1.7.0_60-b19 on Mac OS X 10.9.5
     Intel(R) Core(TM) i7-4558U CPU @ 2.80GHz
     Join w long:                        Best/Avg Time(ms)    Rate(M/s)   Per Row(ns)   Relative
     -------------------------------------------------------------------------------------------
-    Join w long codegen=false                5744 / 5814         18.3          54.8       1.0X
-    Join w long codegen=true                  735 /  853        142.7           7.0       7.8X
+    Join w long codegen=false              11253 / 11753          9.3         107.3       1.0X
+    Join w long codegen=true                 1267 / 1470         82.7          12.1       8.9X
+    */
+
+    runBenchmark("Join w long duplicated", N) {
+      val dim = broadcast(sqlContext.range(M).selectExpr("cast(id/10 as long) as k"))
+      sqlContext.range(N).join(dim, (col("id") bitwiseAND M) === col("k")).count()
+    }
+
+    /**
+    Java HotSpot(TM) 64-Bit Server VM 1.7.0_60-b19 on Mac OS X 10.9.5
+    Intel(R) Core(TM) i7-4558U CPU @ 2.80GHz
+    Join w long duplicated:             Best/Avg Time(ms)    Rate(M/s)   Per Row(ns)   Relative
+    -------------------------------------------------------------------------------------------
+    Join w long duplicated codegen=false    11523 / 11624          9.1         109.9       1.0X
+    Join w long duplicated codegen=true      2781 / 2839         37.7          26.5       4.1X
     */
 
     val dim2 = broadcast(sqlContext.range(M)
@@ -166,11 +181,12 @@ class BenchmarkWholeStageCodegen extends SparkFunSuite {
     }
 
     /**
+    Java HotSpot(TM) 64-Bit Server VM 1.7.0_60-b19 on Mac OS X 10.9.5
     Intel(R) Core(TM) i7-4558U CPU @ 2.80GHz
     Join w 2 ints:                      Best/Avg Time(ms)    Rate(M/s)   Per Row(ns)   Relative
     -------------------------------------------------------------------------------------------
-    Join w 2 ints codegen=false              7159 / 7224         14.6          68.3       1.0X
-    Join w 2 ints codegen=true               1135 / 1197         92.4          10.8       6.3X
+    Join w 2 ints codegen=false            37882 / 41865          2.8         361.3       1.0X
+    Join w 2 ints codegen=true             10854 / 11611          9.7         103.5       3.5X
     */
 
     val dim3 = broadcast(sqlContext.range(M)
@@ -183,22 +199,24 @@ class BenchmarkWholeStageCodegen extends SparkFunSuite {
     }
 
     /**
+    Java HotSpot(TM) 64-Bit Server VM 1.7.0_60-b19 on Mac OS X 10.9.5
     Intel(R) Core(TM) i7-4558U CPU @ 2.80GHz
-    Join w 2 longs:                      Best/Avg Time(ms)    Rate(M/s)   Per Row(ns)   Relative
+    Join w 2 longs:                     Best/Avg Time(ms)    Rate(M/s)   Per Row(ns)   Relative
     -------------------------------------------------------------------------------------------
-    Join w 2 longs codegen=false              7877 / 8358         13.3          75.1       1.0X
-    Join w 2 longs codegen=true               3877 / 3937         27.0          37.0       2.0X
+    Join w 2 longs codegen=false           24850 / 36708          4.2         237.0       1.0X
+    Join w 2 longs codegen=true            13733 / 18734          7.6         131.0       1.8X
       */
     runBenchmark("outer join w long", N) {
       sqlContext.range(N).join(dim, (col("id") bitwiseAND M) === col("k"), "left").count()
     }
 
     /**
+    Java HotSpot(TM) 64-Bit Server VM 1.7.0_60-b19 on Mac OS X 10.9.5
     Intel(R) Core(TM) i7-4558U CPU @ 2.80GHz
     outer join w long:                  Best/Avg Time(ms)    Rate(M/s)   Per Row(ns)   Relative
     -------------------------------------------------------------------------------------------
-    outer join w long codegen=false        15280 / 16497          6.9         145.7       1.0X
-    outer join w long codegen=true            769 /  796        136.3           7.3      19.9X
+    outer join w long codegen=false        25733 / 26307          4.1         245.4       1.0X
+    outer join w long codegen=true            478 /  506        219.4           4.6      53.8X
       */
 
     runBenchmark("semi join w long", N) {
@@ -206,11 +224,12 @@ class BenchmarkWholeStageCodegen extends SparkFunSuite {
     }
 
     /**
+    Java HotSpot(TM) 64-Bit Server VM 1.7.0_60-b19 on Mac OS X 10.9.5
     Intel(R) Core(TM) i7-4558U CPU @ 2.80GHz
     semi join w long:                   Best/Avg Time(ms)    Rate(M/s)   Per Row(ns)   Relative
     -------------------------------------------------------------------------------------------
-    semi join w long codegen=false           5804 / 5969         18.1          55.3       1.0X
-    semi join w long codegen=true             814 /  934        128.8           7.8       7.1X
+    semi join w long codegen=false         10832 / 11118          9.7         103.3       1.0X
+    semi join w long codegen=true            1177 / 1228         89.1          11.2       9.2X
      */
   }
 
