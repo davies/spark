@@ -206,6 +206,24 @@ class BenchmarkWholeStageCodegen extends SparkFunSuite {
     Join w 2 longs codegen=false           24850 / 36708          4.2         237.0       1.0X
     Join w 2 longs codegen=true            13733 / 18734          7.6         131.0       1.8X
       */
+
+    val dim4 = broadcast(sqlContext.range(M)
+      .selectExpr("cast(id/10 as long) as k1", "cast(id/10 as long) as k2"))
+
+    runBenchmark("Join w 2 longs duplicated", N) {
+      sqlContext.range(N).join(dim4,
+        (col("id") bitwiseAND M) === col("k1") && (col("id") bitwiseAND M) === col("k2"))
+        .count()
+    }
+
+    /**
+    Intel(R) Core(TM) i7-4558U CPU @ 2.80GHz
+    Join w 2 longs:                     Best/Avg Time(ms)    Rate(M/s)   Per Row(ns)   Relative
+    -------------------------------------------------------------------------------------------
+    Join w 2 longs duplicated codegen=false 13066 / 13710          8.0         124.6       1.0X
+    Join w 2 longs duplicated codegen=true    7122 / 7277         14.7          67.9       1.8X
+     */
+
     runBenchmark("outer join w long", N) {
       sqlContext.range(N).join(dim, (col("id") bitwiseAND M) === col("k"), "left").count()
     }
@@ -457,7 +475,7 @@ class BenchmarkWholeStageCodegen extends SparkFunSuite {
             value.setInt(0, value.getInt(0) + 1)
             i += 1
           } else {
-            loc.putNewKey(key.getBaseObject, key.getBaseOffset, key.getSizeInBytes,
+            loc.append(key.getBaseObject, key.getBaseOffset, key.getSizeInBytes,
               value.getBaseObject, value.getBaseOffset, value.getSizeInBytes)
           }
         }
