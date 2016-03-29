@@ -45,7 +45,7 @@ class BenchmarkWholeStageCodegen extends SparkFunSuite {
   def runBenchmark(name: String, values: Long)(f: => Unit): Unit = {
     val benchmark = new Benchmark(name, values)
 
-    Seq(false, true).foreach { enabled =>
+    Seq(true).foreach { enabled =>
       benchmark.addCase(s"$name codegen=$enabled") { iter =>
         sqlContext.setConf("spark.sql.codegen.wholeStage", enabled.toString)
         f
@@ -140,12 +140,12 @@ class BenchmarkWholeStageCodegen extends SparkFunSuite {
   }
 
   test("broadcast hash join") {
-    val N = 100 << 20
+    val N = 20 << 20
     val M = (1 << 16) - 1
     val dim = broadcast(sqlContext.range(M).selectExpr("id as k", "cast(id as string) as v"))
 
     runBenchmark("Join w long", N) {
-      sqlContext.range(N).join(dim, (col("id") bitwiseAND M) === col("k")).count()
+      // sqlContext.range(N).join(dim, (col("id") bitwiseAND M) === col("k")).count()
     }
 
     /*
@@ -284,7 +284,7 @@ class BenchmarkWholeStageCodegen extends SparkFunSuite {
       */
   }
 
-  ignore("shuffle hash join") {
+  test("shuffle hash join") {
     val N = 4 << 20
     sqlContext.setConf("spark.sql.shuffle.partitions", "2")
     sqlContext.setConf("spark.sql.autoBroadcastJoinThreshold", "10000000")

@@ -18,7 +18,6 @@
 package org.apache.spark.sql.execution.joins
 
 import java.io.{Externalizable, IOException, ObjectInput, ObjectOutput}
-import java.util.{HashMap => JavaHashMap}
 
 import org.apache.spark.{SparkConf, SparkEnv, SparkException, TaskContext}
 import org.apache.spark.memory.{StaticMemoryManager, TaskMemoryManager}
@@ -96,8 +95,6 @@ private[execution] object HashedRelation {
 
   /**
    * Create a HashedRelation from an Iterator of InternalRow.
-   *
-   * Note: The caller should make sure that these InternalRow are different objects.
    */
   def apply(
       canJoinKeyFitWithinLong: Boolean,
@@ -149,10 +146,11 @@ private[joins] class UnsafeHashedRelation(
       unsafeKey.getSizeInBytes, loc, unsafeKey.hashCode())
     if (loc.isDefined) {
       new Iterator[UnsafeRow] {
-        override var hasNext = true
+        private var _hasNext = true
+        override def hasNext: Boolean = _hasNext
         override def next(): UnsafeRow = {
           resultRow.pointTo(loc.getValueBase, loc.getValueOffset, loc.getValueLength)
-          hasNext = !loc.nextValue()
+          _hasNext = !loc.nextValue()
           resultRow
         }
       }
@@ -311,17 +309,57 @@ private[joins] object UnsafeHashedRelation {
   }
 }
 
+object LongToUnsafeRowMap {
+  val PRIMES = {
+    // the largest prime that below 2^n
+    // https://primes.utm.edu/lists/2small/0bit.html
+    val diffs = Seq(
+      0, 1, 1, 3, 1, 3, 1, 5,
+      3, 3, 9, 3, 1, 3, 19, 15,
+      1, 5, 1, 3, 9, 3, 15, 3,
+      39, 5, 39, 57, 3, 35, 1, 5
+    )
+    val primes = new Array[Int](32)
+    primes(0) = 1
+    var power2 = 1
+    (1 until 32).foreach { i =>
+      power2 *= 2
+      primes(i) = power2 - diffs(i)
+    }
+    primes
+  }
+}
+
 final class LongToUnsafeRowMap(capacity: Int) extends Externalizable {
-  private var mask = capacity - 1
-  private var array = new Array[Long](capacity * 2)
-
-  private var page = new Array[Byte](1 << 26) // 64M
+  import LongToUnsafeRowMap.PRIMES
+  // The actual capacity of map, is a prime number.
+  private var cap = PRIMES.find(_ > capacity).getOrElse{
+    sys.error(s"Can't create map with capacity $capacity")
+  }
+  // The array to store the key and offset of UnsafeRow in the page
+  // [key1] [offset1 | size1] [key2] [offset | size2] ...
+  private var array = new Array[Long](cap * 2)
+  // The page to store all bytes of UnsafeRow
+  private var page = new Array[Byte](1 << 20) // 1M
+  // Current write cursor in the page
   private var cursor = Platform.BYTE_ARRAY_OFFSET
-
+  private var numValues = 0
+  private var numKeys = 0
+  // Whether all the keys are unique or not.
   private var isUnique = true
 
-  def getSlot(key: Long): Int = {
-    (key % (array.length / 2)).toInt * 2
+  def this() = this(0)  // needed by serializer
+
+  def getTotalMemoryConsumption: Long = {
+    array.length * 8 + page.length
+  }
+
+  private def getSlot(key: Long): Int = {
+    var s = (key % cap).toInt * 2
+    if (s < 0) {
+      s += cap * 2
+    }
+    s
   }
 
   def getValue(key: Long, resultRow: UnsafeRow): UnsafeRow = {
@@ -367,12 +405,25 @@ final class LongToUnsafeRowMap(capacity: Int) extends Externalizable {
   }
 
   def append(key: Long, row: UnsafeRow): Unit = {
+    if (cursor + 8 + row.getSizeInBytes > page.length + Platform.BYTE_ARRAY_OFFSET) {
+      // TODO: memory manager
+      if (page.length > (1L << 31)) {
+        sys.error("Can't allocate a page that is larger than 2G")
+      }
+      val newPage = new Array[Byte](page.length * 2)
+      System.arraycopy(page, 0, newPage, 0, cursor - Platform.BYTE_ARRAY_OFFSET)
+      page = newPage
+    }
     val offset = cursor
     Platform.copyMemory(row.getBaseObject, row.getBaseOffset, page, cursor, row.getSizeInBytes)
     cursor += row.getSizeInBytes
     Platform.putLong(page, cursor, 0)
     cursor += 8
+    numValues += 1
+    updateIndex(key, (offset.toLong << 32) | row.getSizeInBytes)
+  }
 
+  private def updateIndex(key: Long, address: Long): Unit = {
     var pos = getSlot(key)
     while (array(pos + 1) != 0 && array(pos) != key) {
       pos += 2
@@ -382,7 +433,11 @@ final class LongToUnsafeRowMap(capacity: Int) extends Externalizable {
     }
     if (array(pos + 1) == 0) {
       array(pos) = key
-      array(pos + 1) = (offset.toLong << 32) | row.getSizeInBytes
+      array(pos + 1) = address
+      numKeys += 1
+      if (numKeys * 2 > cap) {
+        grow()
+      }
     } else {
       var addr = array(pos + 1)
       var pointer = (addr >>> 32) + (addr & 0xffffffffL)
@@ -390,15 +445,50 @@ final class LongToUnsafeRowMap(capacity: Int) extends Externalizable {
         addr = Platform.getLong(page, pointer)
         pointer = (addr >>> 32) + (addr & 0xffffffffL)
       }
-      Platform.putLong(page, pointer, (offset.toLong << 32) | row.getSizeInBytes)
+      Platform.putLong(page, pointer, address)
       isUnique = false
+    }
+  }
+
+  private def grow(): Unit = {
+    val cur_idx = PRIMES.indexOf(cap)
+    if (cur_idx == PRIMES.length - 1) {
+      sys.error("Can't grow map any more")
+    }
+    val old_cap = cap
+    val old_array = array
+    numKeys = 0
+    cap = PRIMES(PRIMES.indexOf(cap) + 1)
+    println(s"grow form ${old_cap} to ${cap}")
+    array = new Array[Long](cap * 2)
+    var i = 0
+    while (i < old_cap * 2) {
+      if (old_array(i + 1) > 0) {
+        updateIndex(old_array(i), old_array(i + 1))
+      }
+      i += 2
     }
   }
 
   def allUnique: Boolean = isUnique
 
   override def writeExternal(out: ObjectOutput): Unit = {
+    out.writeBoolean(isUnique)
 
+    out.writeInt(array.length)
+    val buffer = new Array[Byte](64 << 10)
+    var offset = Platform.LONG_ARRAY_OFFSET
+    val end = array.length * 8 + Platform.LONG_ARRAY_OFFSET
+    while (offset < end) {
+      val size = Math.min(buffer.length, end - offset)
+      Platform.copyMemory(array, offset, buffer, Platform.BYTE_ARRAY_OFFSET, size)
+      out.write(buffer, 0, size)
+      offset += size
+    }
+
+    val used = cursor - Platform.BYTE_ARRAY_OFFSET
+    out.writeInt(used)
+    out.write(page, 0, used)
   }
   override def readExternal(in: ObjectInput): Unit = {
   }
@@ -412,9 +502,13 @@ private[joins] class LongHashedRelation(
   private var resultRow: UnsafeRow = new UnsafeRow(nFields)
 
   // Needed for serialization (it is public to make Java serialization work)
-  def this() = this(null)
+  def this() = this(0, null)
 
   override def copy(): LongHashedRelation = new LongHashedRelation(nFields, hashTable)
+
+  override def getMemorySize: Long = {
+    hashTable.getTotalMemoryConsumption
+  }
 
   override def get(key: InternalRow): Iterator[InternalRow] = {
     if (key.isNullAt(0)) {
@@ -460,7 +554,7 @@ private[joins] object LongHashedRelation {
     keyGenerator: Projection,
     sizeEstimate: Int): HashedRelation = {
 
-    val hashTable: LongToUnsafeRowMap = new LongToUnsafeRowMap(1 << 20)
+    val hashTable: LongToUnsafeRowMap = new LongToUnsafeRowMap(1024)
 
     // Create a mapping of key -> rows
     var numFields = 0
