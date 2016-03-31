@@ -14,25 +14,17 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.spark.sql.catalyst.parser
+package org.apache.spark.status.api.v1
 
-import org.apache.spark.SparkFunSuite
+import javax.ws.rs._
+import javax.ws.rs.core.MediaType
 
-class ASTNodeSuite extends SparkFunSuite {
-  test("SPARK-13157 - remainder must return all input chars") {
-    val inputs = Seq(
-      ("add jar", "file:///tmp/ab/TestUDTF.jar"),
-      ("add jar", "file:///tmp/a@b/TestUDTF.jar"),
-      ("add jar", "c:\\windows32\\TestUDTF.jar"),
-      ("add jar", "some \nbad\t\tfile\r\n.\njar"),
-      ("ADD JAR", "@*#&@(!#@$^*!@^@#(*!@#"),
-      ("SET", "foo=bar"),
-      ("SET", "foo*)(@#^*@&!#^=bar")
-    )
-    inputs.foreach {
-      case (command, arguments) =>
-        val node = ParseDriver.parsePlan(s"$command $arguments", null)
-        assert(node.remainder === arguments)
-    }
-  }
+@Produces(Array(MediaType.APPLICATION_JSON))
+private[v1] class VersionResource(ui: UIRoot) {
+
+  @GET
+  def getVersionInfo(): VersionInfo = new VersionInfo(
+    org.apache.spark.SPARK_VERSION
+  )
+
 }

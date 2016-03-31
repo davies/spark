@@ -14,13 +14,20 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.spark.sql.catalyst.parser
 
-trait ParserConf {
-  def supportQuotedId: Boolean
-  def supportSQL11ReservedKeywords: Boolean
+package org.apache.spark;
+
+import java.io.Serializable;
+
+/**
+ * Exposes information about Spark Executors.
+ *
+ * This interface is not designed to be implemented outside of Spark.  We may add additional methods
+ * which may break binary compatibility with outside implementations.
+ */
+public interface SparkExecutorInfo extends Serializable {
+  String host();
+  int port();
+  long cacheSize();
+  int numRunningTasks();
 }
-
-case class SimpleParserConf(
-    supportQuotedId: Boolean = true,
-    supportSQL11ReservedKeywords: Boolean = false) extends ParserConf
