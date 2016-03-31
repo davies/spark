@@ -18,6 +18,7 @@
 package org.apache.spark.sql.execution.joins
 
 import java.io.{Externalizable, IOException, ObjectInput, ObjectOutput}
+import java.util.{HashMap => JavaHashMap}
 
 import org.apache.spark.{SparkConf, SparkEnv, SparkException, TaskContext}
 import org.apache.spark.memory.{StaticMemoryManager, TaskMemoryManager}
@@ -331,7 +332,7 @@ object LongToUnsafeRowMap {
 }
 
 final class LongToUnsafeRowMap(capacity: Int) extends Externalizable {
-  import LongToUnsafeRowMap.PRIMES
+  import org.apache.spark.sql.execution.joins.LongToUnsafeRowMap.PRIMES
   // The actual capacity of map, is a prime number.
   private var cap = PRIMES.find(_ > capacity).getOrElse{
     sys.error(s"Can't create map with capacity $capacity")
@@ -379,6 +380,7 @@ final class LongToUnsafeRowMap(capacity: Int) extends Externalizable {
     }
     null
   }
+
 
   def get(key: Long, resultRow: UnsafeRow): Iterator[UnsafeRow] = {
     var pos = getSlot(key)
@@ -554,7 +556,7 @@ private[joins] object LongHashedRelation {
     keyGenerator: Projection,
     sizeEstimate: Int): HashedRelation = {
 
-    val hashTable: LongToUnsafeRowMap = new LongToUnsafeRowMap(1024)
+    val hashTable: LongToUnsafeRowMap = new LongToUnsafeRowMap(sizeEstimate)
 
     // Create a mapping of key -> rows
     var numFields = 0
