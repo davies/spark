@@ -77,8 +77,10 @@ class SparkSession(object):
         """Builder for :class:`SparkSession`.
         """
 
-        _lock = RLock()
         _options = {}
+
+        def __init__(self, options=None):
+            self._options = options or {}
 
         @since(2.0)
         def config(self, key=None, value=None, conf=None):
@@ -98,13 +100,13 @@ class SparkSession(object):
             :param value: a value for configuration property
             :param conf: an instance of :class:`SparkConf`
             """
-            with self._lock:
-                if conf is None:
-                    self._options[key] = str(value)
-                else:
-                    for (k, v) in conf.getAll():
-                        self._options[k] = v
-                return self
+            options = dict(self._options)
+            if conf is None:
+                options[key] = str(value)
+            else:
+                for (k, v) in conf.getAll():
+                    options[k] = v
+            return Builder(options)
 
         @since(2.0)
         def master(self, master):
@@ -136,15 +138,14 @@ class SparkSession(object):
             """Gets an existing :class:`SparkSession` or, if there is no existing one, creates a new
             one based on the options set in this builder.
             """
-            with self._lock:
-                from pyspark.conf import SparkConf
-                from pyspark.context import SparkContext
-                from pyspark.sql.context import SQLContext
-                sparkConf = SparkConf()
-                for key, value in self._options.items():
-                    sparkConf.set(key, value)
-                sparkContext = SparkContext.getOrCreate(sparkConf)
-                return SQLContext.getOrCreate(sparkContext).sparkSession
+            from pyspark.conf import SparkConf
+            from pyspark.context import SparkContext
+            from pyspark.sql.context import SQLContext
+            sparkConf = SparkConf()
+            for key, value in self._options.items():
+                sparkConf.set(key, value)
+            sparkContext = SparkContext.getOrCreate(sparkConf)
+            return SQLContext.getOrCreate(sparkContext).sparkSession
 
     builder = Builder()
 
